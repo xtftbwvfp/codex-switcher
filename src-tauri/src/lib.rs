@@ -229,11 +229,18 @@ async fn finalize_oauth_login(state: tauri::State<'_, AppState>, code: String) -
     
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     
+    // 计算过期时间
+    let expires_at = token_res.expires_in.map(|secs| {
+        (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339()
+    });
+    
     let auth_json = serde_json::json!({
         "tokens": {
             "access_token": token_res.access_token,
             "refresh_token": token_res.refresh_token,
-            "account_id": user_info.account_id
+            "id_token": token_res.id_token,
+            "account_id": user_info.account_id,
+            "expires_at": expires_at
         }
     });
 

@@ -17,6 +17,7 @@ function App() {
     settings,
     loading,
     error,
+    refresh,
     importCurrent,
     switchTo,
     deleteAccount,
@@ -187,6 +188,7 @@ function App() {
         isOpen={showAddModal}
         onClose={() => setShowAddModal(false)}
         onAdd={importCurrent}
+        onSuccess={refresh}
       />
     </div>
   );

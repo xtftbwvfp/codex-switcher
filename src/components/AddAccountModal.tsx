@@ -7,11 +7,12 @@ interface AddAccountModalProps {
     isOpen: boolean;
     onClose: () => void;
     onAdd: (name: string, notes?: string) => Promise<void>;
+    onSuccess?: () => void;  // 添加成功后的回调，用于刷新父组件列表
 }
 
 type TabType = 'official' | 'openai';
 
-export function AddAccountModal({ isOpen, onClose, onAdd }: AddAccountModalProps) {
+export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccountModalProps) {
     const { startOAuthLogin, finalizeOAuthLogin } = useAccounts();
     const [activeTab, setActiveTab] = useState<TabType>('openai');
     const [name, setName] = useState('');
@@ -33,6 +34,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd }: AddAccountModalProps
                 setLoading(false);
                 // 延迟关闭模态框，让用户看到成功提示
                 setTimeout(() => {
+                    onSuccess?.();  // 通知父组件刷新列表
                     onClose();
                 }, 1000);
             } catch (err) {
