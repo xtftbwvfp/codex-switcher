@@ -184,6 +184,16 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                 {loading && oauthStatus ? '处理中...' : '立即登录 OpenAI'}
                             </button>
 
+                            {!loading && (
+                                <button
+                                    className="btn btn-ghost btn-full"
+                                    style={{ marginTop: '12px' }}
+                                    onClick={handleClose}
+                                >
+                                    取消
+                                </button>
+                            )}
+
                             {oauthStatus && <div className="oauth-status">{oauthStatus}</div>}
                             {error && <div className="error-message" style={{ marginTop: '16px' }}>{error}</div>}
 

@@ -385,7 +385,7 @@ export function AccountList({
                 <div className="col-drag"></div>
                 <div className="col-email">邮箱</div>
                 <div className="col-quota-merged">模型配额</div>
-                <div className="col-time">最后使用</div>
+                <div className="col-time">时间状态</div>
                 <div className="col-actions">操作</div>
             </div>
 
@@ -435,7 +435,16 @@ export function AccountList({
                                 )}
                             </div>
                             <div className="col-time">
-                                {formatLastUsed(account.last_used)}
+                                <div className="time-item">
+                                    <span className="time-label">使用:</span>
+                                    <span className="time-val">{formatLastUsed(account.last_used)}</span>
+                                </div>
+                                {account.cached_quota?.updated_at && (
+                                    <div className="time-item refresh">
+                                        <span className="time-label">刷新:</span>
+                                        <span className="time-val">{formatLastUsed(account.cached_quota.updated_at)}</span>
+                                    </div>
+                                )}
                             </div>
                             <div className="col-actions">
                                 <button

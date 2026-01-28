@@ -63,8 +63,13 @@ export function AccountCard({ account, isCurrent, onSwitch, onDelete, onEdit }: 
                     {isCurrent && <span className="current-badge">当前</span>}
                 </div>
                 <p className="account-meta">
-                    上次使用: {formatDate(account.last_used)}
+                    使用: {formatDate(account.last_used)}
                 </p>
+                {account.cached_quota?.updated_at && (
+                    <p className="account-meta">
+                        刷新: {formatDate(account.cached_quota.updated_at)}
+                    </p>
+                )}
                 {account.notes && (
                     <p className="account-notes">{account.notes}</p>
                 )}

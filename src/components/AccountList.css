@@ -382,11 +382,42 @@
 
 
 .col-time {
-    width: 110px;
+    width: 125px;
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: 10px;
     color: var(--text-muted);
-    text-align: center;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    justify-content: center;
+    padding: 0 8px;
+}
+
+.time-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    line-height: 1.2;
+}
+
+.time-label {
+    opacity: 0.5;
+    font-size: 9px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.time-val {
+    font-family: var(--font-mono, monospace);
+    opacity: 0.9;
+}
+
+.time-item.refresh {
+    color: var(--success-color);
+}
+
+.time-item.refresh .time-val {
+    opacity: 0.8;
 }
 
 .col-actions {
