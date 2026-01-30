@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { useAccounts } from './hooks/useAccounts';
 import { useUsage } from './hooks/useUsage';
 import { AddAccountModal } from './components/AddAccountModal';
@@ -69,13 +71,18 @@ function App() {
   const handleExport = async () => {
     try {
       const json = await exportAccounts();
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `codex-accounts-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const path = await save({
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }],
+        defaultPath: `codex-accounts-${new Date().toISOString().slice(0, 10)}.json`
+      });
+      
+      if (path) {
+        await writeTextFile(path, json);
+        alert('导出成功！文件已保存到: ' + path);
+      }
     } catch (err) {
       alert('导出失败: ' + String(err));
     }
