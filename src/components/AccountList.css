@@ -336,6 +336,10 @@
     gap: 4px;
     font-size: 10px;
     font-weight: 500;
+    white-space: nowrap;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .quota-time.success {

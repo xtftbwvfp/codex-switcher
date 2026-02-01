@@ -80,8 +80,10 @@ pub struct Account {
 pub struct CachedQuota {
     pub five_hour_left: f64,
     pub five_hour_reset: String,
+    pub five_hour_reset_at: Option<i64>,
     pub weekly_left: f64,
     pub weekly_reset: String,
+    pub weekly_reset_at: Option<i64>,
     pub plan_type: String,
     #[serde(default = "default_true")]
     pub is_valid_for_cli: bool,

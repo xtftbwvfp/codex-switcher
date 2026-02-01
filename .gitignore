@@ -26,3 +26,4 @@ dist-ssr
 # Rust/Tauri
 src-tauri/target
 docs/
+\n# Gemini CLI\n.gemini-clipboard/

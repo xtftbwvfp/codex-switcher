@@ -4,8 +4,10 @@ import { invoke } from '@tauri-apps/api/core';
 export interface CachedQuota {
     five_hour_left: number;
     five_hour_reset: string;
+    five_hour_reset_at?: number;
     weekly_left: number;
     weekly_reset: string;
+    weekly_reset_at?: number;
     plan_type: string;
     is_valid_for_cli?: boolean;
     updated_at: string;
