@@ -30,6 +30,10 @@ pub struct AppSettings {
     /// 刷新间隔（分钟）
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_minutes: u32,
+
+    /// 主题设置: "light" | "dark"
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 fn default_primary_ide() -> String {
@@ -40,6 +44,10 @@ fn default_refresh_interval() -> u32 {
     30
 }
 
+fn default_theme() -> String {
+    "light".to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -48,6 +56,7 @@ impl Default for AppSettings {
             use_pkill_restart: false,
             background_refresh: true,
             refresh_interval_minutes: default_refresh_interval(),
+            theme: default_theme(),
         }
     }
 }
@@ -80,8 +89,10 @@ pub struct Account {
 pub struct CachedQuota {
     pub five_hour_left: f64,
     pub five_hour_reset: String,
+    pub five_hour_reset_at: Option<i64>,
     pub weekly_left: f64,
     pub weekly_reset: String,
+    pub weekly_reset_at: Option<i64>,
     pub plan_type: String,
     #[serde(default = "default_true")]
     pub is_valid_for_cli: bool,

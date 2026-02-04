@@ -7,10 +7,59 @@ import './AccountList.css';
 interface UsageData {
     five_hour_left: number;
     five_hour_reset: string;
+    five_hour_reset_at?: number;
     weekly_left: number;
     weekly_reset: string;
+    weekly_reset_at?: number;
     plan_type: string;
     is_valid_for_cli: boolean;
+}
+
+function QuotaTimer({ resetAt, resetStr }: { resetAt?: number, resetStr: string }) {
+    const [timeLeft, setTimeLeft] = useState(resetStr);
+
+    useEffect(() => {
+        if (!resetAt) {
+            setTimeLeft(resetStr);
+            return;
+        }
+
+        const update = () => {
+            const now = Math.floor(Date.now() / 1000);
+            const diff = resetAt - now;
+
+            if (diff <= 0) {
+                setTimeLeft('Soon');
+                return;
+            }
+
+            const days = Math.floor(diff / 86400);
+            const hours = Math.floor((diff % 86400) / 3600);
+            const mins = Math.floor((diff % 3600) / 60);
+            const secs = diff % 60;
+
+            if (days > 0) {
+                // > 24h: display d h m
+                setTimeLeft(`${days}d ${hours}h ${mins}m`);
+            } else if (hours > 0) {
+                // > 1h: display h m s
+                setTimeLeft(`${hours}h ${mins}m ${secs}s`);
+            } else {
+                // < 1h: display m s
+                setTimeLeft(`${mins}m ${secs}s`);
+            }
+        };
+
+        update();
+        const timer = setInterval(update, 1000);
+        return () => clearInterval(timer);
+    }, [resetAt, resetStr]);
+
+    const title = resetAt
+        ? new Date(resetAt * 1000).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : resetStr;
+
+    return <span title={`重置时间: ${title}`}>{timeLeft}</span>;
 }
 
 type FilterType = 'all' | 'plus' | 'team' | 'free';
@@ -62,8 +111,10 @@ export function AccountList({
                 initial[acc.id] = {
                     five_hour_left: acc.cached_quota.five_hour_left,
                     five_hour_reset: acc.cached_quota.five_hour_reset,
+                    five_hour_reset_at: acc.cached_quota.five_hour_reset_at,
                     weekly_left: acc.cached_quota.weekly_left,
                     weekly_reset: acc.cached_quota.weekly_reset,
+                    weekly_reset_at: acc.cached_quota.weekly_reset_at,
                     plan_type: acc.cached_quota.plan_type,
                     is_valid_for_cli: isValid,
                 };
@@ -257,7 +308,14 @@ export function AccountList({
     };
 
     // 获取时间颜色
-    const getTimeColorClass = (dateStr: string | undefined): string => {
+    const getTimeColorClass = (dateStr: string | undefined, resetAt?: number): string => {
+        if (resetAt) {
+            const now = Date.now() / 1000;
+            const hours = (resetAt - now) / 3600;
+            if (hours < 1) return 'success';
+            if (hours < 6) return 'warning';
+            return 'neutral';
+        }
         const { hours } = parseChineseDuration(dateStr);
         if (hours === 999) return 'neutral';
         if (hours < 1) return 'success';
@@ -272,7 +330,7 @@ export function AccountList({
         return 'red';
     };
 
-    const renderQuotaItem = (label: string, percentage: number | undefined, resetTime: string | undefined) => {
+    const renderQuotaItem = (label: string, percentage: number | undefined, resetTime: string | undefined, resetTimestamp?: number) => {
         if (percentage === undefined) return (
             <div className="quota-mini-card empty">
                 <span className="quota-label">{label}</span>
@@ -280,7 +338,7 @@ export function AccountList({
             </div>
         );
 
-        const timeColor = getTimeColorClass(resetTime);
+        const timeColor = getTimeColorClass(resetTime, resetTimestamp);
         const barColor = getQuotaColor(percentage);
 
         return (
@@ -295,7 +353,7 @@ export function AccountList({
                     <span className="quota-label">{label}</span>
                     <div className={`quota-time ${timeColor}`}>
                         <Clock className="icon-tiny" />
-                        <span>{formatTimeRemaining(resetTime)}</span>
+                        <QuotaTimer resetAt={resetTimestamp} resetStr={formatTimeRemaining(resetTime)} />
                     </div>
                     <span className={`quota-percent ${barColor}`}>{Math.round(percentage)}%</span>
                 </div>
@@ -337,6 +395,12 @@ export function AccountList({
                         onClick={() => setFilter('team')}
                     >
                         TEAM <span className="filter-count">{filterCounts.team}</span>
+                    </button>
+                    <button
+                        className={`filter-btn ${filter === 'free' ? 'active' : ''}`}
+                        onClick={() => setFilter('free')}
+                    >
+                        FREE <span className="filter-count">{filterCounts.free}</span>
                     </button>
                 </div>
 
@@ -432,8 +496,15 @@ export function AccountList({
                             <div className="col-quota-merged">
                                 {usage ? (
                                     <div className="quota-grid">
-                                        {renderQuotaItem('5H 限额', usage.five_hour_left, usage.five_hour_reset)}
-                                        {renderQuotaItem('周限额', usage.weekly_left, usage.weekly_reset)}
+                                        {/* FREE accounts only have one quota (shown in five_hour_* fields) */}
+                                        {usage.plan_type?.toLowerCase() === 'free' ? (
+                                            renderQuotaItem('限额', usage.five_hour_left, usage.five_hour_reset, usage.five_hour_reset_at)
+                                        ) : (
+                                            <>
+                                                {renderQuotaItem('5H 限额', usage.five_hour_left, usage.five_hour_reset, usage.five_hour_reset_at)}
+                                                {renderQuotaItem('周限额', usage.weekly_left, usage.weekly_reset, usage.weekly_reset_at)}
+                                            </>
+                                        )}
                                     </div>
                                 ) : (
                                     <span className="quota-empty">- 暂无配额信息 -</span>

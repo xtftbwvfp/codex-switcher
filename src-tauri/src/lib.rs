@@ -329,8 +329,10 @@ async fn get_quota_by_id(state: tauri::State<'_, AppState>, id: String) -> Resul
             account.cached_quota = Some(account::CachedQuota {
                 five_hour_left: usage.five_hour_left as f64,
                 five_hour_reset: usage.five_hour_reset.clone(),
+                five_hour_reset_at: usage.five_hour_reset_at,
                 weekly_left: usage.weekly_left as f64,
                 weekly_reset: usage.weekly_reset.clone(),
+                weekly_reset_at: usage.weekly_reset_at,
                 plan_type: usage.plan_type.clone(),
                 is_valid_for_cli: usage.is_valid_for_cli,
                 updated_at: Utc::now(),
@@ -344,8 +346,10 @@ async fn get_quota_by_id(state: tauri::State<'_, AppState>, id: String) -> Resul
             account.cached_quota = Some(account::CachedQuota {
                 five_hour_left: usage.five_hour_left as f64,
                 five_hour_reset: usage.five_hour_reset.clone(),
+                five_hour_reset_at: usage.five_hour_reset_at,
                 weekly_left: usage.weekly_left as f64,
                 weekly_reset: usage.weekly_reset.clone(),
+                weekly_reset_at: usage.weekly_reset_at,
                 plan_type: usage.plan_type.clone(),
                 is_valid_for_cli: usage.is_valid_for_cli,
                 updated_at: Utc::now(),
@@ -378,6 +382,8 @@ async fn reload_ide_windows(use_window_reload: bool) -> Result<Vec<String>, Stri
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState::new())
         .setup(|app| {
             // 初始化系统托盘

@@ -1,13 +1,10 @@
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import './Settings.css';
+import { AppSettings } from '../hooks/useAccounts';
 
-interface AppSettings {
-    auto_reload_ide: boolean;
-    primary_ide: string;
-    use_pkill_restart: boolean;
-    background_refresh: boolean;
-    refresh_interval_minutes: number;
+interface SettingsProps {
+    settings: AppSettings;
+    onUpdateSettings: (settings: AppSettings) => Promise<void>;
 }
 
 const IDE_OPTIONS = [
@@ -17,35 +14,26 @@ const IDE_OPTIONS = [
     { value: 'VSCode', label: 'VS Code' },
 ];
 
-export function Settings() {
-    const [settings, setSettings] = useState<AppSettings>({
-        auto_reload_ide: false,
-        primary_ide: 'Windsurf',
-        use_pkill_restart: false,
-        background_refresh: true,
-        refresh_interval_minutes: 30,
-    });
+const THEME_OPTIONS = [
+    { value: 'light', label: '浅色 (White)' },
+    { value: 'dark', label: '深色 (Dark)' },
+];
+
+export function Settings({ settings, onUpdateSettings }: SettingsProps) {
+    const [localSettings, setLocalSettings] = useState<AppSettings>(settings);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
 
+    // Sync local settings when props change
     useEffect(() => {
-        loadSettings();
-    }, []);
-
-    const loadSettings = async () => {
-        try {
-            const data = await invoke<AppSettings>('get_settings');
-            setSettings(data);
-        } catch (e) {
-            console.error('加载设置失败:', e);
-        }
-    };
+        setLocalSettings(settings);
+    }, [settings]);
 
     const saveSettings = async () => {
         setSaving(true);
         setMessage(null);
         try {
-            await invoke('update_settings', { settings });
+            await onUpdateSettings(localSettings);
             setMessage('✅ 设置已保存');
             setTimeout(() => setMessage(null), 3000);
         } catch (e) {
@@ -56,7 +44,7 @@ export function Settings() {
     };
 
     const updateField = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
-        setSettings(prev => ({ ...prev, [key]: value }));
+        setLocalSettings(prev => ({ ...prev, [key]: value }));
     };
 
     return (
@@ -73,6 +61,25 @@ export function Settings() {
             </div>
 
             {message && <div className="settings-message">{message}</div>}
+
+            <div className="settings-section">
+                <h3>外观</h3>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">主题模式</span>
+                        <span className="setting-desc">切换应用显示主题</span>
+                    </div>
+                    <select
+                        className="select-input"
+                        value={localSettings.theme || 'light'}
+                        onChange={e => updateField('theme', e.target.value)}
+                    >
+                        {THEME_OPTIONS.map(opt => (
+                            <option key={opt.value} value={opt.value}>{opt.label}</option>
+                        ))}
+                    </select>
+                </div>
+            </div>
 
             <div className="settings-section">
                 <h3>后台服务</h3>
@@ -98,7 +105,7 @@ export function Settings() {
                         className="number-input"
                         min={5}
                         max={120}
-                        value={settings.refresh_interval_minutes}
+                        value={localSettings.refresh_interval_minutes}
                         onChange={e => updateField('refresh_interval_minutes', parseInt(e.target.value) || 30)}
                     />
                 </div>
@@ -115,14 +122,14 @@ export function Settings() {
                     <label className="toggle">
                         <input
                             type="checkbox"
-                            checked={settings.auto_reload_ide}
+                            checked={localSettings.auto_reload_ide}
                             onChange={e => updateField('auto_reload_ide', e.target.checked)}
                         />
                         <span className="toggle-slider"></span>
                     </label>
                 </div>
 
-                {settings.auto_reload_ide && (
+                {localSettings.auto_reload_ide && (
                     <>
                         <div className="setting-item sub-item">
                             <div className="setting-info">
@@ -131,7 +138,7 @@ export function Settings() {
                             </div>
                             <select
                                 className="select-input"
-                                value={settings.primary_ide}
+                                value={localSettings.primary_ide}
                                 onChange={e => updateField('primary_ide', e.target.value)}
                             >
                                 {IDE_OPTIONS.map(opt => (
@@ -148,7 +155,7 @@ export function Settings() {
                             <label className="toggle">
                                 <input
                                     type="checkbox"
-                                    checked={settings.use_pkill_restart}
+                                    checked={localSettings.use_pkill_restart}
                                     onChange={e => updateField('use_pkill_restart', e.target.checked)}
                                 />
                                 <span className="toggle-slider"></span>

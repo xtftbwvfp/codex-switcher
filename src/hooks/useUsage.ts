@@ -6,9 +6,11 @@ export interface UsageDisplay {
     five_hour_used: number;
     five_hour_left: number;
     five_hour_reset: string;
+    five_hour_reset_at?: number;
     weekly_used: number;
     weekly_left: number;
     weekly_reset: string;
+    weekly_reset_at?: number;
     credits_balance: number | null;
     has_credits: boolean;
 }

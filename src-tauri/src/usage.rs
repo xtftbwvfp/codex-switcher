@@ -18,12 +18,16 @@ pub struct UsageDisplay {
     pub five_hour_left: i32,
     /// 5小时重置时间描述
     pub five_hour_reset: String,
+    /// 5小时重置时间戳
+    pub five_hour_reset_at: Option<i64>,
     /// 周窗口使用百分比
     pub weekly_used: i32,
     /// 周窗口剩余百分比
     pub weekly_left: i32,
     /// 周重置时间描述
     pub weekly_reset: String,
+    /// 周重置时间戳
+    pub weekly_reset_at: Option<i64>,
     /// 额度余额
     pub credits_balance: Option<f64>,
     /// 是否有额度
@@ -203,12 +207,12 @@ impl UsageFetcher {
             .to_string();
 
         // 解析 5 小时窗口
-        let (five_hour_used, five_hour_reset) = Self::parse_window(
+        let (five_hour_used, five_hour_reset, five_hour_reset_at) = Self::parse_window(
             json.get("rate_limit").and_then(|r| r.get("primary_window"))
         );
 
         // 解析周窗口
-        let (weekly_used, weekly_reset) = Self::parse_window(
+        let (weekly_used, weekly_reset, weekly_reset_at) = Self::parse_window(
             json.get("rate_limit").and_then(|r| r.get("secondary_window"))
         );
 
@@ -237,9 +241,11 @@ impl UsageFetcher {
             five_hour_used,
             five_hour_left: 100 - five_hour_used,
             five_hour_reset,
+            five_hour_reset_at,
             weekly_used,
             weekly_left: 100 - weekly_used,
             weekly_reset,
+            weekly_reset_at,
             credits_balance,
             has_credits: has_credits || unlimited,
             is_valid_for_cli: true, // 能走到这里说明 API 请求成功，Token 是有效的
@@ -247,10 +253,10 @@ impl UsageFetcher {
     }
 
     /// 解析窗口数据
-    fn parse_window(window: Option<&Value>) -> (i32, String) {
+    fn parse_window(window: Option<&Value>) -> (i32, String, Option<i64>) {
         let window = match window {
             Some(w) => w,
-            None => return (0, "未知".to_string()),
+            None => return (0, "未知".to_string(), None),
         };
 
         let used_percent = window.get("used_percent")
@@ -263,7 +269,10 @@ impl UsageFetcher {
             .or_else(|| window.get("reset_at").and_then(|v| v.as_i64()))
             .unwrap_or(0);
 
+        let mut final_reset_ts = None;
+
         let reset_str = if reset_at > 0 {
+            final_reset_ts = Some(reset_at);
             Self::format_reset(reset_at)
         } else {
             // 尝试使用 reset_after_seconds
@@ -272,13 +281,15 @@ impl UsageFetcher {
                 .and_then(|v| Self::parse_int(v))
                 .unwrap_or(0);
             if reset_after > 0 {
+                use chrono::Utc;
+                final_reset_ts = Some(Utc::now().timestamp() + reset_after as i64);
                 Self::format_duration(reset_after as i64)
             } else {
                 "未知".to_string()
             }
         };
 
-        (used_percent, reset_str)
+        (used_percent, reset_str, final_reset_ts)
     }
 
     /// 解析数字（支持字符串和数字）
