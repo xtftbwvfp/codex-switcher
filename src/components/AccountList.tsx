@@ -396,6 +396,12 @@ export function AccountList({
                     >
                         TEAM <span className="filter-count">{filterCounts.team}</span>
                     </button>
+                    <button
+                        className={`filter-btn ${filter === 'free' ? 'active' : ''}`}
+                        onClick={() => setFilter('free')}
+                    >
+                        FREE <span className="filter-count">{filterCounts.free}</span>
+                    </button>
                 </div>
 
                 <div className="toolbar-spacer"></div>
@@ -490,8 +496,15 @@ export function AccountList({
                             <div className="col-quota-merged">
                                 {usage ? (
                                     <div className="quota-grid">
-                                        {renderQuotaItem('5H 限额', usage.five_hour_left, usage.five_hour_reset, usage.five_hour_reset_at)}
-                                        {renderQuotaItem('周限额', usage.weekly_left, usage.weekly_reset, usage.weekly_reset_at)}
+                                        {/* FREE accounts only have one quota (shown in five_hour_* fields) */}
+                                        {usage.plan_type?.toLowerCase() === 'free' ? (
+                                            renderQuotaItem('限额', usage.five_hour_left, usage.five_hour_reset, usage.five_hour_reset_at)
+                                        ) : (
+                                            <>
+                                                {renderQuotaItem('5H 限额', usage.five_hour_left, usage.five_hour_reset, usage.five_hour_reset_at)}
+                                                {renderQuotaItem('周限额', usage.weekly_left, usage.weekly_reset, usage.weekly_reset_at)}
+                                            </>
+                                        )}
                                     </div>
                                 ) : (
                                     <span className="quota-empty">- 暂无配额信息 -</span>
