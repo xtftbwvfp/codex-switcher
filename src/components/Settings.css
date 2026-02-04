@@ -48,8 +48,8 @@
 }
 
 .settings-section {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--section-bg);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     padding: 20px;
     margin-bottom: 16px;
@@ -59,7 +59,7 @@
     margin: 0 0 16px 0;
     font-size: 1rem;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.9);
+    color: var(--text-primary);
 }
 
 .setting-item {
@@ -67,7 +67,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 12px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid var(--border-color);
 }
 
 .setting-item:last-child {
@@ -76,7 +76,7 @@
 
 .setting-item.sub-item {
     padding-left: 20px;
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--hover-bg);
     margin: 0 -20px;
     padding-right: 20px;
 }
@@ -89,12 +89,12 @@
 
 .setting-label {
     font-weight: 500;
-    color: rgba(255, 255, 255, 0.9);
+    color: var(--text-primary);
 }
 
 .setting-desc {
     font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--text-secondary);
 }
 
 /* Toggle Switch */
@@ -113,7 +113,7 @@
 .toggle-slider {
     width: 44px;
     height: 24px;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--input-border);
     border-radius: 12px;
     position: relative;
     transition: all 0.2s ease;
@@ -146,17 +146,17 @@
 
 .toggle-text {
     font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--text-secondary);
 }
 
 /* Number Input */
 .number-input {
     width: 80px;
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
     border-radius: 8px;
-    color: white;
+    color: var(--text-primary);
     font-size: 0.9rem;
     text-align: center;
 }
@@ -169,10 +169,10 @@
 /* Select Input */
 .select-input {
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
     border-radius: 8px;
-    color: white;
+    color: var(--text-primary);
     font-size: 0.9rem;
     cursor: pointer;
 }
@@ -183,6 +183,6 @@
 }
 
 .select-input option {
-    background: #1e293b;
-    color: white;
+    background: var(--card-bg);
+    color: var(--text-primary);
 }

@@ -118,7 +118,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 14px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--input-bg);
     border-radius: 8px;
     border: 1px solid var(--border-color);
 }
@@ -180,7 +180,7 @@
 
 .link-card:hover {
     border-color: var(--primary-color);
-    background: rgba(88, 166, 255, 0.05);
+    background: var(--hover-bg);
 }
 
 .link-arrow,

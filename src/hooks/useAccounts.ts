@@ -19,6 +19,7 @@ export interface AppSettings {
     use_pkill_restart: boolean;
     background_refresh: boolean;
     refresh_interval_minutes: number;
+    theme: string;
 }
 
 export interface Account {
@@ -40,6 +41,7 @@ export function useAccounts() {
         use_pkill_restart: false,
         background_refresh: true,
         refresh_interval_minutes: 30,
+        theme: 'light',
     });
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

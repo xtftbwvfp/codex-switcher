@@ -54,6 +54,11 @@ function App() {
     };
   }, [refresh]);
 
+  // Apply theme
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', settings.theme || 'light');
+  }, [settings.theme]);
+
   // 切换账号后刷新用量
   const handleSwitch = async (id: string) => {
     await switchTo(id);
@@ -78,7 +83,7 @@ function App() {
         }],
         defaultPath: `codex-accounts-${new Date().toISOString().slice(0, 10)}.json`
       });
-      
+
       if (path) {
         await writeTextFile(path, json);
         alert('导出成功！文件已保存到: ' + path);
@@ -201,7 +206,7 @@ function App() {
             onRefreshComplete={refresh}
           />
         ) : (
-          <Settings />
+          <Settings settings={settings} onUpdateSettings={updateSettings} />
         )}
       </main>
 

@@ -1,5 +1,41 @@
-/* ===== CSS 变量 ===== */
 :root {
+  /* Light Theme (Olive Agate) */
+  --bg-primary: #ffffff;
+  --bg-secondary: #fcfdfc;
+  --card-bg: #ffffff;
+  --border-color: #dbe0de;
+
+  /* User requested deep dark colors for text */
+  --text-primary: #1B211A;
+  --text-secondary: #2F3A2E;
+  --text-muted: #4A5748;
+  /* Much darker than before */
+
+  /* User Palette: #1B211A, #628141, #8BAE66, #EBD5AB */
+  --primary-color: #628141;
+  --primary-hover: #4a6331;
+  --success-color: #628141;
+  --warning-color: #EBD5AB;
+  --danger-color: #ad5a5a;
+  --accent-color: #8BAE66;
+  --purple-color: #628141;
+  /* Harmonize */
+
+  /* Semantic UI Colors */
+  --input-bg: #fcfdfc;
+  --input-border: #dbe0de;
+  --section-bg: #f7f9f8;
+  /* Changed to neutral Agate Grey/White instead of Orange tint */
+  --hover-bg: rgba(139, 174, 102, 0.1);
+  /* #8BAE66 with low opacity */
+  --badge-bg: rgba(98, 129, 65, 0.1);
+  /* #628141 with low opacity */
+
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+}
+
+[data-theme='dark'] {
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
   --card-bg: #1c2128;
@@ -17,8 +53,12 @@
   --accent-color: #238636;
   --purple-color: #a371f7;
 
-  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
+  /* Semantic UI Colors */
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --section-bg: rgba(255, 255, 255, 0.03);
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --badge-bg: rgba(255, 255, 255, 0.1);
 }
 
 /* ===== 全局样式 ===== */
@@ -87,14 +127,36 @@ body {
   transition: all 0.2s ease;
 }
 
+.header-nav {
+  display: flex;
+  gap: 4px;
+  background: var(--badge-bg);
+  padding: 4px;
+  border-radius: 8px;
+}
+
+.nav-item {
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
 .nav-item:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hover-bg);
 }
 
 .nav-item.active {
   color: var(--primary-color);
-  background: rgba(88, 166, 255, 0.15);
+  background: var(--input-bg);
+  font-weight: 600;
 }
 
 
@@ -226,7 +288,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--input-bg);
   border-radius: 8px;
 }
 
@@ -272,7 +334,7 @@ body {
 
 .link-card:hover {
   border-color: var(--primary-color);
-  background: rgba(88, 166, 255, 0.05);
+  background: var(--hover-bg);
 }
 
 .link-arrow,
@@ -411,7 +473,7 @@ body {
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hover-bg);
   color: var(--text-primary);
   border-color: var(--text-muted);
 }
@@ -423,7 +485,7 @@ body {
 }
 
 .btn-outline:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--hover-bg);
   border-color: var(--text-muted);
 }
 
