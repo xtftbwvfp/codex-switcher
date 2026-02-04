@@ -1,6 +1,6 @@
 [package]
 name = "codex-switcher"
-version = "0.2.0"
+version = "0.1.2"
 description = "Codex 账号快速切换工具"
 authors = ["xiaojian"]
 edition = "2021"
