@@ -1,134 +1,84 @@
-//! 后台调度器 - Token 自动刷新
+//! 后台调度器 - 账号状态同步
 //!
-//! 借鉴 CodexBar 的全局定时轮询 + Antigravity 的静默刷新
+//! 对齐 Codex 行为：不主动续期 Token，仅按间隔同步当前账号的 auth.json 状态。
 
 use crate::account::AccountStore;
 use std::sync::{Arc, Mutex};
-use tokio::time::{interval, Duration};
 use tauri::Emitter;
+use tokio::time::Duration;
 
-/// 启动后台 Token 刷新调度器
-pub fn start(store: Arc<Mutex<AccountStore>>, app_handle: tauri::AppHandle) {
+/// 启动后台状态同步调度器
+pub fn start(
+    store: Arc<Mutex<AccountStore>>,
+    app_handle: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
     // 使用 Tauri 的 async runtime 而不是直接 tokio::spawn
     // 因为在 setup() 中调用时 Tokio runtime 可能尚未完全初始化
     tauri::async_runtime::spawn(async move {
-        // 默认 30 分钟轮询一次
-        let mut ticker = interval(Duration::from_secs(30 * 60));
-        
-        println!("✅ 后台调度器已启动 (间隔: 30 分钟)");
-        
+        println!("✅ 后台调度器已启动");
+
         loop {
-            ticker.tick().await;
-            
-            println!("[Scheduler] 开始检查 Token 有效期...");
-            
-            // 获取所有账号
-            let accounts = {
+            let (enabled, interval_minutes) = {
                 let store = store.lock().unwrap();
-                store.accounts.values().cloned().collect::<Vec<_>>()
+                (
+                    store.settings.background_refresh,
+                    store.settings.refresh_interval_minutes,
+                )
             };
-            
-            let mut refreshed_count = 0;
-            
-            for account in accounts {
-                // 检查 Token 是否即将过期
-                if let Some(ref refresh_token) = account.refresh_token {
-                    if is_token_expiring_soon(&account.auth_json) {
-                        println!("[Scheduler] 账号 {} Token 即将过期，正在刷新...", account.name);
-                        
-                        // 调用刷新逻辑
-                        match refresh_token_silently(refresh_token, &account.auth_json).await {
-                            Ok(new_auth) => {
-                                // 更新 store 中的 auth_json
-                                let mut store = store.lock().unwrap();
-                                if let Some(acc) = store.accounts.get_mut(&account.id) {
-                                    acc.auth_json = new_auth;
-                                    refreshed_count += 1;
-                                    println!("[Scheduler] ✅ 账号 {} Token 刷新成功", account.name);
+
+            if !enabled {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+
+            println!("[Scheduler] 开始后台同步检查...");
+
+            let interval_minutes = if interval_minutes == 0 {
+                30
+            } else {
+                interval_minutes
+            };
+
+            // 仅同步当前账号：auth.json 是权威源，不对任何账号做主动 refresh_token 续期
+            let mut synced_current = false;
+            if let Ok(official_auth) = AccountStore::read_codex_auth() {
+                let mut store = store.lock().unwrap();
+                if let Some(current_id) = store.current.clone() {
+                    let local_auth = store.accounts.get(&current_id).map(|a| a.auth_json.clone());
+
+                    if let Some(local_auth) = local_auth {
+                        if AccountStore::auth_identity_matches(&local_auth, &official_auth) {
+                            if local_auth != official_auth {
+                                println!(
+                                    "[Scheduler] 当前账号 {} 检测到官方 auth.json 变动，按权威源同步。",
+                                    current_id
+                                );
+                                if store.sync_account_from_auth_json(&current_id, official_auth) {
+                                    let _ = store.save();
+                                    synced_current = true;
+                                    println!("[Scheduler] ✅ 当前账号反向同步成功");
                                 }
-                                let _ = store.save();
+                            } else {
+                                println!(
+                                    "[Scheduler] 当前账号 {} 与官方 auth.json 一致。",
+                                    current_id
+                                );
                             }
-                            Err(e) => {
-                                println!("[Scheduler] ❌ 账号 {} Token 刷新失败: {}", account.name, e);
-                            }
+                        } else {
+                            println!(
+                                "[Scheduler] 当前账号 {} 与官方 auth.json 身份不匹配，跳过同步。",
+                                current_id
+                            );
                         }
                     }
                 }
             }
-            
-            if refreshed_count > 0 {
-                println!("[Scheduler] 本轮刷新了 {} 个账号的 Token", refreshed_count);
-                
-                // 发送事件通知前端更新账号列表
+
+            if synced_current {
                 let _ = app_handle.emit("accounts-updated", ());
-            } else {
-                println!("[Scheduler] 所有 Token 状态良好，无需刷新");
             }
+
+            tokio::time::sleep(Duration::from_secs(u64::from(interval_minutes) * 60)).await;
         }
-    });
-}
-
-/// 检查 Token 是否即将过期（剩余 < 10 分钟）
-fn is_token_expiring_soon(auth_json: &serde_json::Value) -> bool {
-    // 优先从 tokens.expires_at 获取 (可能是 RFC3339 字符串)
-    let expires_at_val = auth_json.get("tokens")
-        .and_then(|t| t.get("expires_at"))
-        .or_else(|| auth_json.get("expires_at"));
-
-    if let Some(val) = expires_at_val {
-        let timestamp = if let Some(ts) = val.as_i64() {
-            ts
-        } else if let Some(iso_str) = val.as_str() {
-            // 解析 RFC3339 字符串
-            chrono::DateTime::parse_from_rfc3339(iso_str)
-                .map(|dt| dt.timestamp())
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        if timestamp > 0 {
-            let now = chrono::Utc::now().timestamp();
-            let remaining = timestamp - now;
-            return remaining < 600; // 10 分钟
-        }
-    }
-    false
-}
-
-/// 静默刷新 Token
-async fn refresh_token_silently(refresh_token: &str, old_auth: &serde_json::Value) -> Result<serde_json::Value, String> {
-    // 复用 OAuth 模块的刷新逻辑
-    let token_response = crate::oauth::refresh_access_token(refresh_token).await?;
-    
-    // 计算新的过期时间
-    let expires_in = token_response.expires_in.unwrap_or(3600);
-    let expires_at_iso = (chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64)).to_rfc3339();
-    
-    // 构建新的 auth_json，保留原有结构
-    let mut new_auth = old_auth.clone();
-    if let Some(obj) = new_auth.as_object_mut() {
-        obj.insert("last_refresh".to_string(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
-        
-        if let Some(tokens_obj) = obj.get_mut("tokens").and_then(|v| v.as_object_mut()) {
-            tokens_obj.insert("access_token".to_string(), serde_json::json!(token_response.access_token));
-            if let Some(rt) = token_response.refresh_token {
-                tokens_obj.insert("refresh_token".to_string(), serde_json::json!(rt));
-            }
-            if let Some(it) = token_response.id_token {
-                tokens_obj.insert("id_token".to_string(), serde_json::json!(it));
-            }
-            tokens_obj.insert("expires_at".to_string(), serde_json::json!(expires_at_iso));
-        } else {
-            // 如果旧结构受损，尝试重建基础结构
-            obj.insert("tokens".to_string(), serde_json::json!({
-                "access_token": token_response.access_token,
-                "refresh_token": token_response.refresh_token,
-                "id_token": token_response.id_token,
-                "expires_at": expires_at_iso
-            }));
-        }
-    }
-    
-    Ok(new_auth)
+    })
 }
