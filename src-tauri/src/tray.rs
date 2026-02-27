@@ -1,4 +1,3 @@
-use crate::AppState;
 use tauri::{
     image::Image,
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
@@ -28,7 +27,8 @@ pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = window.show();
                         let _ = window.set_focus();
                         #[cfg(target_os = "macos")]
-                        app.set_activation_policy(tauri::ActivationPolicy::Regular).unwrap_or(());
+                        app.set_activation_policy(tauri::ActivationPolicy::Regular)
+                            .unwrap_or(());
                     }
                 }
             }

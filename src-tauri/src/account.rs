@@ -31,6 +31,10 @@ pub struct AppSettings {
     /// 刷新间隔（分钟）
     #[serde(default = "default_refresh_interval")]
     pub refresh_interval_minutes: u32,
+
+    /// 非活跃账号在距离失效前多少天开始保活刷新
+    #[serde(default = "default_inactive_refresh_days")]
+    pub inactive_refresh_days: u32,
 }
 
 fn default_primary_ide() -> String {
@@ -39,6 +43,10 @@ fn default_primary_ide() -> String {
 
 fn default_refresh_interval() -> u32 {
     30
+}
+
+fn default_inactive_refresh_days() -> u32 {
+    7
 }
 
 fn default_false() -> bool {
@@ -53,6 +61,7 @@ impl Default for AppSettings {
             use_pkill_restart: false,
             background_refresh: false,
             refresh_interval_minutes: default_refresh_interval(),
+            inactive_refresh_days: default_inactive_refresh_days(),
         }
     }
 }
@@ -77,6 +86,37 @@ pub struct Account {
     /// 缓存的配额信息
     #[serde(default)]
     pub cached_quota: Option<CachedQuota>,
+
+    /// 非活跃账号保活状态
+    #[serde(default)]
+    pub keepalive: KeepaliveState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeepaliveState {
+    /// 是否允许调度器为该账号执行“非活跃保活刷新”
+    #[serde(default = "default_true")]
+    pub inactive_refresh_enabled: bool,
+    /// 最近一次保活尝试时间
+    #[serde(default)]
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    /// 最近一次保活成功时间
+    #[serde(default)]
+    pub last_success_at: Option<DateTime<Utc>>,
+    /// 最近一次保活错误
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for KeepaliveState {
+    fn default() -> Self {
+        Self {
+            inactive_refresh_enabled: true,
+            last_attempt_at: None,
+            last_success_at: None,
+            last_error: None,
+        }
+    }
 }
 
 /// 缓存的配额信息
@@ -260,6 +300,7 @@ impl AccountStore {
             last_used: None,
             notes,
             cached_quota: None,
+            keepalive: KeepaliveState::default(),
         };
 
         self.accounts.insert(id.clone(), account.clone());
@@ -331,6 +372,16 @@ impl AccountStore {
             account.notes = notes;
         }
 
+        Ok(())
+    }
+
+    /// 设置某账号是否允许“非活跃保活刷新”
+    pub fn set_inactive_refresh_enabled(&mut self, id: &str, enabled: bool) -> Result<(), String> {
+        let account = self
+            .accounts
+            .get_mut(id)
+            .ok_or_else(|| format!("账号不存在: {}", id))?;
+        account.keepalive.inactive_refresh_enabled = enabled;
         Ok(())
     }
 
@@ -503,6 +554,85 @@ impl AccountStore {
             .filter(|account| Self::extract_last_refresh(&account.auth_json).is_none())
             .map(|account| account.name.clone())
             .collect()
+    }
+
+    /// 记录保活刷新尝试结果（失败）
+    pub fn mark_keepalive_attempt_failed(&mut self, id: &str, reason: String) {
+        if let Some(account) = self.accounts.get_mut(id) {
+            account.keepalive.last_attempt_at = Some(Utc::now());
+            account.keepalive.last_error = Some(reason);
+        }
+    }
+
+    /// 记录保活刷新成功
+    pub fn mark_keepalive_attempt_success(&mut self, id: &str) {
+        if let Some(account) = self.accounts.get_mut(id) {
+            let now = Utc::now();
+            account.keepalive.last_attempt_at = Some(now);
+            account.keepalive.last_success_at = Some(now);
+            account.keepalive.last_error = None;
+        }
+    }
+
+    /// 对非当前账号：是否应触发保活刷新
+    pub fn should_refresh_inactive_account(account: &Account, inactive_refresh_days: u32) -> bool {
+        if !account.keepalive.inactive_refresh_enabled {
+            return false;
+        }
+        let refresh_days = i64::from(inactive_refresh_days.max(1));
+        match Self::extract_last_refresh(&account.auth_json) {
+            Some(last) => last <= Utc::now() - chrono::Duration::days(refresh_days),
+            None => true,
+        }
+    }
+
+    /// 应用 refresh token 成功返回的新令牌（原子更新账号结构）
+    pub fn apply_refreshed_tokens(
+        account: &mut Account,
+        access_token: String,
+        refresh_token: Option<String>,
+        id_token: Option<String>,
+        expires_in: Option<u64>,
+    ) {
+        let now = Utc::now();
+
+        if let Some(obj) = account.auth_json.as_object_mut() {
+            if !obj.contains_key("tokens") {
+                obj.insert("tokens".to_string(), serde_json::json!({}));
+            }
+            if let Some(tokens_obj) = obj.get_mut("tokens").and_then(|v| v.as_object_mut()) {
+                tokens_obj.insert("access_token".to_string(), serde_json::json!(access_token));
+
+                if let Some(rt) = refresh_token.as_ref() {
+                    tokens_obj.insert("refresh_token".to_string(), serde_json::json!(rt));
+                } else if let Some(existing_rt) = account.refresh_token.as_deref() {
+                    if tokens_obj.get("refresh_token").is_none() {
+                        tokens_obj
+                            .insert("refresh_token".to_string(), serde_json::json!(existing_rt));
+                    }
+                }
+
+                if let Some(idt) = id_token {
+                    tokens_obj.insert("id_token".to_string(), serde_json::json!(idt));
+                }
+
+                if let Some(expires_secs) = expires_in {
+                    let expires_at =
+                        (now + chrono::Duration::seconds(expires_secs as i64)).to_rfc3339();
+                    tokens_obj.insert("expires_at".to_string(), serde_json::json!(expires_at));
+                }
+            }
+            obj.insert(
+                "last_refresh".to_string(),
+                serde_json::json!(now.to_rfc3339()),
+            );
+        }
+
+        if let Some(rt) = refresh_token {
+            account.refresh_token = Some(rt);
+        } else if account.refresh_token.is_none() {
+            account.refresh_token = Self::extract_refresh_token(&account.auth_json);
+        }
     }
 
     /// 使用提供的 auth.json 同步指定账号

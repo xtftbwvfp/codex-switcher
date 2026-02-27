@@ -26,9 +26,9 @@ struct QuarantineFixTicket {
 }
 
 fn allow_local_refresh_for_quota(is_current: bool) -> bool {
-    // 手工刷新时仅允许“非当前账号”走本地 refresh_token 续期。
-    // 当前账号交由 Codex 官方流程维护，避免双端并发续期导致 token reused。
-    !is_current
+    let _ = is_current;
+    // 统一禁用配额查询路径下的本地 refresh。防止非当前账号消耗旧 refresh_token。
+    false
 }
 
 fn detect_sync_conflict_for_current(
@@ -226,6 +226,19 @@ fn update_account(
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.update_account(&id, name, notes)?;
+    store.save()?;
+    Ok(())
+}
+
+/// 设置账号级“非活跃保活刷新”开关
+#[tauri::command]
+fn set_account_inactive_refresh_enabled(
+    state: State<AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    store.set_inactive_refresh_enabled(&id, enabled)?;
     store.save()?;
     Ok(())
 }
@@ -672,6 +685,7 @@ pub fn run() {
             sync_current_auth_to_account,
             delete_account,
             update_account,
+            set_account_inactive_refresh_enabled,
             export_accounts,
             import_accounts,
             check_codex_login,
@@ -714,13 +728,14 @@ mod tests {
             last_used: None,
             notes: None,
             cached_quota: None,
+            keepalive: account::KeepaliveState::default(),
         }
     }
 
     #[test]
-    fn quota_refresh_allows_only_non_current_account_local_token_refresh() {
+    fn quota_refresh_never_allows_local_token_refresh() {
         assert!(!allow_local_refresh_for_quota(true));
-        assert!(allow_local_refresh_for_quota(false));
+        assert!(!allow_local_refresh_for_quota(false));
     }
 
     #[test]

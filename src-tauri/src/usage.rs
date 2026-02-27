@@ -1,11 +1,9 @@
 //! Codex Switcher - 用量获取模块
-//! 
+//!
 //! 从 OpenAI API 获取 Codex 使用量信息
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs;
-use std::path::PathBuf;
 
 /// 前端展示的用量数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,12 +14,16 @@ pub struct UsageDisplay {
     pub five_hour_used: i32,
     /// 5小时窗口剩余百分比
     pub five_hour_left: i32,
+    /// 5小时窗口标签 (如 "5H 限额")
+    pub five_hour_label: String,
     /// 5小时重置时间描述
     pub five_hour_reset: String,
     /// 周窗口使用百分比
     pub weekly_used: i32,
     /// 周窗口剩余百分比
     pub weekly_left: i32,
+    /// 周窗口标签 (如 "周限额")
+    pub weekly_label: String,
     /// 周重置时间描述
     pub weekly_reset: String,
     /// 额度余额
@@ -32,58 +34,16 @@ pub struct UsageDisplay {
     pub is_valid_for_cli: bool,
 }
 
-/// Auth.json tokens 结构
-#[derive(Debug, Clone, Deserialize)]
-struct AuthTokens {
-    access_token: Option<String>,
-    account_id: Option<String>,
-}
-
-/// Auth.json 结构
-#[derive(Debug, Clone, Deserialize)]
-struct AuthJson {
-    tokens: Option<AuthTokens>,
-}
-
 /// 用量获取器
 pub struct UsageFetcher;
 
 impl UsageFetcher {
-    /// 获取 Codex auth.json 路径
-    fn auth_path() -> PathBuf {
-        dirs::home_dir()
-            .expect("无法获取用户目录")
-            .join(".codex")
-            .join("auth.json")
-    }
-
-    /// 读取认证信息
-    pub fn read_auth() -> Result<(String, Option<String>), String> {
-        let path = Self::auth_path();
-        if !path.exists() {
-            return Err("未找到 Codex auth.json，请先登录 Codex".to_string());
-        }
-
-        let content = fs::read_to_string(&path)
-            .map_err(|e| format!("读取 auth.json 失败: {}", e))?;
-
-        let auth: AuthJson = serde_json::from_str(&content)
-            .map_err(|e| format!("解析 auth.json 失败: {}", e))?;
-
-        let tokens = auth.tokens
-            .ok_or_else(|| "auth.json 中没有 tokens 字段".to_string())?;
-
-        let token = tokens.access_token
-            .ok_or_else(|| "auth.json 中没有 access_token".to_string())?;
-
-        Ok((token, tokens.account_id))
-    }
-
     /// 从 API 获取用量 (直接使用提供的 Token，不读取 auth.json)
     pub async fn fetch_usage_direct(
         access_token: String,
         account_id: Option<String>,
         refresh_token: Option<String>,
+        allow_local_refresh: bool,
     ) -> Result<(UsageDisplay, Option<crate::oauth::TokenResponse>), String> {
         let mut current_token = access_token;
         let mut new_tokens: Option<crate::oauth::TokenResponse> = None;
@@ -102,20 +62,24 @@ impl UsageFetcher {
             req
         };
 
-        let mut response = build_request(&current_token, &account_id).send().await
+        let mut response = build_request(&current_token, &account_id)
+            .send()
+            .await
             .map_err(|e| format!("网络请求失败: {}", e))?;
 
         let mut status = response.status();
-        
-        // 如果 401/403 且有 refresh_token，尝试刷新
-        if (status == 401 || status == 403) && refresh_token.is_some() {
+
+        // 如果允许本地刷新，且 401/403 且有 refresh_token，尝试刷新
+        if allow_local_refresh && (status == 401 || status == 403) && refresh_token.is_some() {
             if let Some(ref rt) = refresh_token {
                 if let Ok(token_res) = crate::oauth::refresh_access_token(rt).await {
                     current_token = token_res.access_token.clone();
                     new_tokens = Some(token_res);
-                    
+
                     // 重试请求
-                    response = build_request(&current_token, &account_id).send().await
+                    response = build_request(&current_token, &account_id)
+                        .send()
+                        .await
                         .map_err(|e| format!("刷新后重试失败: {}", e))?;
                     status = response.status();
                 }
@@ -123,94 +87,45 @@ impl UsageFetcher {
         }
 
         if status == 401 || status == 403 {
+            if !allow_local_refresh {
+                return Err(
+                    "当前激活账号访问配额接口返回 401/403；已禁用本地 refresh_token 刷新，请稍后重试或在 Codex 中触发一次请求".to_string(),
+                );
+            }
             // 如果刷新后仍然 401/403，标记为无效
             return Err("TOKEN_INVALID:授权已失效，请删除该账号后重新登录".to_string());
         }
 
-        let text = response.text().await
+        let text = response
+            .text()
+            .await
             .map_err(|e| format!("读取响应失败: {}", e))?;
 
-        let json: Value = serde_json::from_str(&text)
-            .map_err(|e| format!("解析 JSON 失败: {}", e))?;
+        let json: Value =
+            serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {}", e))?;
 
         let display = Self::parse_usage_response(&json)?;
-        
-        Ok((display, new_tokens))
-    }
 
-    /// 从 API 获取用量 (从 auth.json 读取 Token)
-    pub async fn fetch_usage(refresh_token: Option<String>) -> Result<(UsageDisplay, Option<crate::oauth::TokenResponse>), String> {
-        let (mut access_token, account_id) = Self::read_auth()?;
-        let mut new_tokens: Option<crate::oauth::TokenResponse> = None;
-
-        let client = reqwest::Client::new();
-        let build_request = |at: &str, aid: &Option<String>| {
-            let mut req = client
-                .get("https://chatgpt.com/backend-api/wham/usage")
-                .header("Authorization", format!("Bearer {}", at))
-                .header("User-Agent", "CodexSwitcher/1.0")
-                .header("Accept", "application/json")
-                .timeout(std::time::Duration::from_secs(30));
-            if let Some(id) = aid {
-                req = req.header("ChatGPT-Account-Id", id);
-            }
-            req
-        };
-
-        let mut response = build_request(&access_token, &account_id).send().await
-            .map_err(|e| format!("网络请求失败: {}", e))?;
-
-        let mut status = response.status();
-        
-        // 如果 401 且有 refresh_token，尝试刷新
-        if (status == 401 || status == 403) && refresh_token.is_some() {
-            if let Some(ref rt) = refresh_token {
-                if let Ok(token_res) = crate::oauth::refresh_access_token(rt).await {
-                    access_token = token_res.access_token.clone();
-                    new_tokens = Some(token_res);
-                    
-                    // 重试请求
-                    response = build_request(&access_token, &account_id).send().await
-                        .map_err(|e| format!("刷新后重试失败: {}", e))?;
-                    status = response.status();
-                }
-            }
-        }
-
-        if status == 401 || status == 403 {
-            return Err("认证失败，请重新登录 Codex".to_string());
-        }
-
-        if !status.is_success() {
-            return Err(format!("API 返回错误: {}", status));
-        }
-
-        let text = response.text().await
-            .map_err(|e| format!("读取响应失败: {}", e))?;
-
-        let json: Value = serde_json::from_str(&text)
-            .map_err(|e| format!("解析 JSON 失败: {}", e))?;
-
-        let display = Self::parse_usage_response(&json)?;
         Ok((display, new_tokens))
     }
 
     /// 从 Value 解析用量数据
     fn parse_usage_response(json: &Value) -> Result<UsageDisplay, String> {
-        let plan_type = json.get("plan_type")
+        let plan_type = json
+            .get("plan_type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
 
-        // 解析 5 小时窗口
-        let (five_hour_used, five_hour_reset) = Self::parse_window(
-            json.get("rate_limit").and_then(|r| r.get("primary_window"))
-        );
+        let rate_limit = json.get("rate_limit");
 
-        // 解析周窗口
-        let (weekly_used, weekly_reset) = Self::parse_window(
-            json.get("rate_limit").and_then(|r| r.get("secondary_window"))
-        );
+        // 解析 5 小时窗口 (Primary)
+        let primary_val = rate_limit.and_then(|r| r.get("primary_window"));
+        let (p_used, p_reset, p_label) = Self::parse_window(primary_val, "5H 限额");
+
+        // 解析周窗口 (Secondary)
+        let secondary_val = rate_limit.and_then(|r| r.get("secondary_window"));
+        let (s_used, s_reset, s_label) = Self::parse_window(secondary_val, "周限额");
 
         // 解析额度
         let credits = json.get("credits");
@@ -224,76 +139,98 @@ impl UsageFetcher {
             .unwrap_or(false);
         let credits_balance = credits
             .and_then(|c| c.get("balance"))
-            .and_then(|v| Self::parse_number(v));
-
-        // 解析允许状态
-        let _is_allowed = json.get("rate_limit")
-            .and_then(|r| r.get("allowed"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .and_then(Self::parse_number);
 
         Ok(UsageDisplay {
             plan_type,
-            five_hour_used,
-            five_hour_left: 100 - five_hour_used,
-            five_hour_reset,
-            weekly_used,
-            weekly_left: 100 - weekly_used,
-            weekly_reset,
+            five_hour_used: p_used,
+            five_hour_left: 100 - p_used,
+            five_hour_label: p_label,
+            five_hour_reset: p_reset,
+            weekly_used: s_used,
+            weekly_left: 100 - s_used,
+            weekly_label: s_label,
+            weekly_reset: s_reset,
             credits_balance,
             has_credits: has_credits || unlimited,
-            is_valid_for_cli: true, // 能走到这里说明 API 请求成功，Token 是有效的
+            is_valid_for_cli: true,
         })
     }
 
     /// 解析窗口数据
-    fn parse_window(window: Option<&Value>) -> (i32, String) {
+    fn parse_window(window: Option<&Value>, default_label: &str) -> (i32, String, String) {
         let window = match window {
             Some(w) => w,
-            None => return (0, "未知".to_string()),
+            None => return (0, "未知".to_string(), default_label.to_string()),
         };
 
-        let used_percent = window.get("used_percent")
-            .and_then(|v| Self::parse_int(v))
+        // 关键修复：使用 f64 解析百分比，然后四舍五入
+        let used_percent = window
+            .get("used_percent")
+            .and_then(Self::parse_number)
+            .map(|f| f.round() as i32)
             .unwrap_or(0);
 
-        let reset_at = window.get("reset_at")
-            .and_then(|v| Self::parse_int(v) as Option<i32>)
-            .map(|v| v as i64)
-            .or_else(|| window.get("reset_at").and_then(|v| v.as_i64()))
+        let reset_at = window
+            .get("reset_at")
+            .and_then(Self::parse_number)
+            .map(|f| f as i64)
             .unwrap_or(0);
+
+        let limit_window_seconds = window
+            .get("limit_window_seconds")
+            .and_then(Self::parse_number)
+            .map(|f| f as i64)
+            .unwrap_or(0);
+
+        // 动态计算标签
+        let label = if limit_window_seconds > 0 {
+            Self::get_limits_label(limit_window_seconds)
+        } else {
+            default_label.to_string()
+        };
 
         let reset_str = if reset_at > 0 {
             Self::format_reset(reset_at)
         } else {
             // 尝试使用 reset_after_seconds
-            let reset_after = window.get("reset_after_seconds")
+            let reset_after = window
+                .get("reset_after_seconds")
                 .or_else(|| window.get("reset_after_sec"))
-                .and_then(|v| Self::parse_int(v))
+                .and_then(Self::parse_number)
+                .map(|f| f as i64)
                 .unwrap_or(0);
             if reset_after > 0 {
-                Self::format_duration(reset_after as i64)
+                Self::format_duration(reset_after)
             } else {
                 "未知".to_string()
             }
         };
 
-        (used_percent, reset_str)
+        (used_percent, reset_str, label)
     }
 
-    /// 解析数字（支持字符串和数字）
-    fn parse_number(v: &Value) -> Option<f64> {
-        match v {
-            Value::Number(n) => n.as_f64(),
-            Value::String(s) => s.parse().ok(),
-            _ => None,
+    /// 根据窗口秒数获取人类可读标签
+    fn get_limits_label(seconds: i64) -> String {
+        const SECS_PER_HOUR: i64 = 3600;
+        const SECS_PER_DAY: i64 = 24 * SECS_PER_HOUR;
+        const SECS_PER_WEEK: i64 = 7 * SECS_PER_DAY;
+
+        if seconds <= SECS_PER_HOUR * 5 + 600 {
+            "5H 限额".to_string()
+        } else if seconds <= SECS_PER_DAY + 600 {
+            "24H 限额".to_string()
+        } else if seconds <= SECS_PER_WEEK + 3600 {
+            "周限额".to_string()
+        } else {
+            format!("{}H 限额", (seconds + 3599) / 3600)
         }
     }
 
-    /// 解析整数（支持字符串和数字）
-    fn parse_int(v: &Value) -> Option<i32> {
+    /// 解析数字（支持字符串和数字，且支持浮点）
+    fn parse_number(v: &Value) -> Option<f64> {
         match v {
-            Value::Number(n) => n.as_i64().map(|i| i as i32),
+            Value::Number(n) => n.as_f64(),
             Value::String(s) => s.parse().ok(),
             _ => None,
         }
@@ -307,7 +244,8 @@ impl UsageFetcher {
             return "未知".to_string();
         }
 
-        let reset_time = Utc.timestamp_opt(reset_at, 0)
+        let reset_time = Utc
+            .timestamp_opt(reset_at, 0)
             .single()
             .unwrap_or_else(Utc::now);
         let now = Utc::now();

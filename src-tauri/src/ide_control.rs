@@ -6,12 +6,13 @@ const IDE_CONFIGS: &[(&str, &str)] = &[
     ("Cursor", "com.todesktop.230313mzl4w4u92"),
     ("Windsurf", "com.exafunction.windsurf"),
     ("Antigravity", "com.google.antigravity"),
+    ("Codex", "com.openai.codex"), // 暂定，用户确认后修正
 ];
 
 /// 检测运行中的 IDE
 pub fn detect_running_ides() -> Vec<String> {
     let mut running = Vec::new();
-    
+
     for &(name, bundle_id) in IDE_CONFIGS {
         let script = format!(
             r#"
@@ -45,7 +46,7 @@ pub fn reload_ide(name: &str, use_window_reload: bool) -> Result<(), String> {
             .arg("-f")
             .arg("codex app-server")
             .output();
-        
+
         match output {
             Ok(o) if o.status.success() => return Ok(()),
             _ => {
@@ -57,7 +58,8 @@ pub fn reload_ide(name: &str, use_window_reload: bool) -> Result<(), String> {
 
     // 2. 通用逻辑：对于其他 IDE (Antigravity, Cursor, VS Code)
     // 优先尝试模拟按键指令
-    let bundle_id = IDE_CONFIGS.iter()
+    let bundle_id = IDE_CONFIGS
+        .iter()
         .find(|&&(n, _)| n == name)
         .map(|&(_, b)| b)
         .ok_or_else(|| format!("未找到 IDE {} 的配置", name))?;
@@ -88,12 +90,25 @@ pub fn reload_ide(name: &str, use_window_reload: bool) -> Result<(), String> {
 
     match run_applescript(&script) {
         Ok(_) => Ok(()),
-        Err(e) if e.contains("1002") || e.contains("不由自主") || e.contains("不允许发送按键") => {
+        Err(e) if e.contains("1002") || e.contains("不由自主") || e.contains("不允许发送按键") =>
+        {
             // 捕获权限错误，返回一个友好的提示，而不是直接报错
-            Err(format!("PERMISSION_DENIED:需要“辅助功能”权限来重载窗口。请手动重载或在设置中授予权限。"))
-        },
+            Err(
+                "PERMISSION_DENIED:需要“辅助功能”权限来重载窗口。请手动重载或在设置中授予权限。"
+                    .to_string(),
+            )
+        }
         Err(e) => Err(e),
     }
+}
+
+/// 移除 Codex App 的隔离属性 (修复闪退)
+pub fn remove_quarantine() -> Result<(), String> {
+    let script = r#"
+    do shell script "xattr -dr com.apple.quarantine /Applications/Codex.app" with administrator privileges
+    "#;
+
+    run_applescript(script).map(|_| ())
 }
 
 /// 执行 AppleScript

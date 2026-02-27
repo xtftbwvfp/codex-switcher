@@ -4,8 +4,10 @@ import { invoke } from '@tauri-apps/api/core';
 export interface CachedQuota {
     five_hour_left: number;
     five_hour_reset: string;
+    five_hour_label?: string;
     weekly_left: number;
     weekly_reset: string;
+    weekly_label?: string;
     plan_type: string;
     is_valid_for_cli?: boolean;
     updated_at: string;
@@ -17,6 +19,14 @@ export interface AppSettings {
     use_pkill_restart: boolean;
     background_refresh: boolean;
     refresh_interval_minutes: number;
+    inactive_refresh_days: number;
+}
+
+export interface KeepaliveState {
+    inactive_refresh_enabled: boolean;
+    last_attempt_at: string | null;
+    last_success_at: string | null;
+    last_error: string | null;
 }
 
 export interface Account {
@@ -27,6 +37,7 @@ export interface Account {
     last_used: string | null;
     notes: string | null;
     cached_quota: CachedQuota | null;
+    keepalive: KeepaliveState;
 }
 
 export function useAccounts() {
@@ -36,8 +47,9 @@ export function useAccounts() {
         auto_reload_ide: false,
         primary_ide: 'Windsurf',
         use_pkill_restart: false,
-        background_refresh: true,
+        background_refresh: false,
         refresh_interval_minutes: 30,
+        inactive_refresh_days: 7,
     });
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -67,6 +79,17 @@ export function useAccounts() {
     // 初始加载
     useEffect(() => {
         loadData();
+    }, [loadData]);
+
+    const setInactiveRefreshEnabled = useCallback(async (id: string, enabled: boolean) => {
+        try {
+            setError(null);
+            await invoke('set_account_inactive_refresh_enabled', { id, enabled });
+            await loadData();
+        } catch (err) {
+            setError(String(err));
+            throw err;
+        }
     }, [loadData]);
 
     // 更新设置
@@ -216,5 +239,9 @@ export function useAccounts() {
         finalizeOAuthLogin,
         reloadIdeWindows,
         updateSettings,
+        setInactiveRefreshEnabled,
+        checkSyncConflict: useCallback(async () => {
+            return invoke<string | null>('check_sync_conflict');
+        }, []),
     };
 }

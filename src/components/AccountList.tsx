@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Zap, RefreshCw, ArrowLeftRight, Trash2, Clock } from 'lucide-react';
+import { Zap, RefreshCw, ArrowLeftRight, Trash2, Clock, ShieldCheck, ShieldOff } from 'lucide-react';
 import { Account, AppSettings } from '../hooks/useAccounts';
 import { invoke } from '@tauri-apps/api/core';
 import './AccountList.css';
@@ -7,8 +7,10 @@ import './AccountList.css';
 interface UsageData {
     five_hour_left: number;
     five_hour_reset: string;
+    five_hour_label: string;
     weekly_left: number;
     weekly_reset: string;
+    weekly_label: string;
     plan_type: string;
     is_valid_for_cli: boolean;
 }
@@ -21,8 +23,20 @@ interface AccountListProps {
     settings: AppSettings;
     onSwitch: (id: string) => void;
     onDelete: (id: string) => void;
+    onSetInactiveRefreshEnabled: (id: string, enabled: boolean) => void;
     onUpdateSettings: (settings: AppSettings) => void;
     onRefreshComplete?: () => void;  // 刷新完成后的回调
+}
+
+interface IdentitySnapshot {
+    claimEmail: string | null;
+    claimAccountId: string | null;
+    tokenAccountId: string | null;
+}
+
+interface IdentityCheckResult {
+    inconsistent: boolean;
+    reasons: string[];
 }
 
 export function AccountList({
@@ -31,6 +45,7 @@ export function AccountList({
     settings,
     onSwitch,
     onDelete,
+    onSetInactiveRefreshEnabled,
     onUpdateSettings,
     onRefreshComplete,
 }: AccountListProps) {
@@ -62,8 +77,10 @@ export function AccountList({
                 initial[acc.id] = {
                     five_hour_left: acc.cached_quota.five_hour_left,
                     five_hour_reset: acc.cached_quota.five_hour_reset,
+                    five_hour_label: acc.cached_quota.five_hour_label || '5H 限额',
                     weekly_left: acc.cached_quota.weekly_left,
                     weekly_reset: acc.cached_quota.weekly_reset,
+                    weekly_label: acc.cached_quota.weekly_label || '周限额',
                     plan_type: acc.cached_quota.plan_type,
                     is_valid_for_cli: isValid,
                 };
@@ -244,11 +261,155 @@ export function AccountList({
     };
 
     // 格式化时间
-    const formatLastUsed = (date?: string | null) => {
-        if (!date) return '-';
-        const d = new Date(date);
+    const formatDateValue = (value?: string | Date | null) => {
+        if (!value) return '-';
+        const d = typeof value === 'string' ? new Date(value) : value;
         if (isNaN(d.getTime())) return '-';
         return d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+
+    const formatLastUsed = (date?: string | null) => {
+        return formatDateValue(date);
+    };
+
+    const formatKeepaliveError = (err: string | null | undefined) => {
+        if (!err) return '-';
+        if (err.includes('refresh_token_reused')) return 'RT 已复用（需重登）';
+        if (err.includes('refresh_token_invalidated')) return 'RT 已吊销（需重登）';
+        if (err.includes('refresh_token_expired')) return 'RT 已过期（需重登）';
+        return err.length > 24 ? `${err.slice(0, 24)}...` : err;
+    };
+
+    const classifyKeepaliveError = (err: string | null | undefined): 'permanent' | 'transient' | null => {
+        if (!err) return null;
+        const lower = err.toLowerCase();
+        if (
+            lower.includes('refresh_token_reused') ||
+            lower.includes('refresh_token_invalidated') ||
+            lower.includes('refresh_token_expired')
+        ) {
+            return 'permanent';
+        }
+        return 'transient';
+    };
+
+    const getKeepaliveStatusText = (
+        isCurrent: boolean,
+        keepaliveEnabled: boolean,
+        keepaliveLastError: string | null | undefined,
+    ): { text: string; warn: boolean } => {
+        if (isCurrent) {
+            return { text: '当前账号（官方维护）', warn: false };
+        }
+        if (!keepaliveEnabled) {
+            return { text: '已停用（手动/熔断）', warn: true };
+        }
+        const kind = classifyKeepaliveError(keepaliveLastError);
+        if (kind === 'permanent') {
+            return { text: '需重新登录', warn: true };
+        }
+        if (kind === 'transient') {
+            return { text: '临时失败（待重试）', warn: true };
+        }
+        return { text: '独占保活已启用', warn: false };
+    };
+
+    const getNextRefreshInfo = (
+        isCurrent: boolean,
+        keepaliveEnabled: boolean,
+        lastRefresh: Date | null,
+    ): { text: string; warn: boolean } => {
+        if (isCurrent) return { text: '官方维护', warn: false };
+        if (!keepaliveEnabled) return { text: '已停用', warn: true };
+        if (!lastRefresh) return { text: '缺少 last_refresh', warn: true };
+        const refreshDays = Math.max(settings.inactive_refresh_days || 1, 1);
+        const nextAt = new Date(lastRefresh.getTime() + refreshDays * 24 * 60 * 60 * 1000);
+        if (isNaN(nextAt.getTime())) return { text: '-', warn: true };
+        if (nextAt.getTime() <= Date.now()) return { text: '已到期（等待调度）', warn: true };
+        return { text: formatDateValue(nextAt), warn: false };
+    };
+
+    const decodeJwtPayload = (jwt: string): Record<string, unknown> | null => {
+        const parts = jwt.split('.');
+        if (parts.length < 2) return null;
+        try {
+            const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+            const raw = atob(padded);
+            const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+            const text = new TextDecoder().decode(bytes);
+            const parsed = JSON.parse(text);
+            if (!parsed || typeof parsed !== 'object') return null;
+            return parsed as Record<string, unknown>;
+        } catch {
+            return null;
+        }
+    };
+
+    const extractIdentitySnapshot = (authJson: unknown): IdentitySnapshot => {
+        if (!authJson || typeof authJson !== 'object') {
+            return { claimEmail: null, claimAccountId: null, tokenAccountId: null };
+        }
+
+        const root = authJson as Record<string, unknown>;
+        const tokens = (root.tokens && typeof root.tokens === 'object'
+            ? root.tokens as Record<string, unknown>
+            : null);
+
+        const idToken = typeof tokens?.id_token === 'string' ? tokens.id_token : null;
+        const payload = idToken ? decodeJwtPayload(idToken) : null;
+        const profile = (payload?.['https://api.openai.com/profile'] &&
+            typeof payload['https://api.openai.com/profile'] === 'object'
+            ? payload['https://api.openai.com/profile'] as Record<string, unknown>
+            : null);
+        const authClaim = (payload?.['https://api.openai.com/auth'] &&
+            typeof payload['https://api.openai.com/auth'] === 'object'
+            ? payload['https://api.openai.com/auth'] as Record<string, unknown>
+            : null);
+
+        const claimEmail =
+            (typeof payload?.email === 'string' ? payload.email : null) ??
+            (typeof profile?.email === 'string' ? profile.email : null);
+        const claimAccountId =
+            (typeof authClaim?.chatgpt_account_id === 'string' ? authClaim.chatgpt_account_id : null) ??
+            (typeof payload?.chatgpt_account_id === 'string' ? payload.chatgpt_account_id : null);
+        const tokenAccountId = typeof tokens?.account_id === 'string' ? tokens.account_id : null;
+
+        return { claimEmail, claimAccountId, tokenAccountId };
+    };
+
+    const checkIdentityConsistency = (accountName: string, authJson: unknown): IdentityCheckResult => {
+        const snapshot = extractIdentitySnapshot(authJson);
+        const reasons: string[] = [];
+        const normalizedName = accountName.trim().toLowerCase();
+        const normalizedClaimEmail = snapshot.claimEmail?.trim().toLowerCase();
+
+        if (normalizedName && normalizedClaimEmail && normalizedName !== normalizedClaimEmail) {
+            reasons.push(`账号名(${accountName}) 与 token邮箱(${snapshot.claimEmail}) 不一致`);
+        }
+        if (snapshot.tokenAccountId && snapshot.claimAccountId && snapshot.tokenAccountId !== snapshot.claimAccountId) {
+            reasons.push(`token_account_id 与 claim_account_id 不一致`);
+        }
+
+        return {
+            inconsistent: reasons.length > 0,
+            reasons,
+        };
+    };
+
+    const extractLastRefresh = (authJson: unknown): Date | null => {
+        if (!authJson || typeof authJson !== 'object') return null;
+        const raw = (authJson as { [key: string]: unknown }).last_refresh;
+        if (typeof raw === 'string') {
+            const d = new Date(raw);
+            return isNaN(d.getTime()) ? null : d;
+        }
+        if (typeof raw === 'number') {
+            const ms = raw > 1_000_000_000_000 ? raw : raw * 1000;
+            const d = new Date(ms);
+            return isNaN(d.getTime()) ? null : d;
+        }
+        return null;
     };
 
     // 格式化剩余时间
@@ -377,111 +538,173 @@ export function AccountList({
             </div>
 
 
-            {/* 表头 */}
-            <div className="account-table-header">
-                <div className="col-checkbox">
-                    <input
-                        type="checkbox"
-                        className="custom-checkbox"
-                        checked={filteredAccounts.length > 0 && filteredAccounts.every(a => selectedIds.has(a.id))}
-                        onChange={handleToggleAll}
-                    />
+            <div className="account-table-scroll">
+                {/* 表头 */}
+                <div className="account-table-header">
+                    <div className="col-checkbox">
+                        <input
+                            type="checkbox"
+                            className="custom-checkbox"
+                            checked={filteredAccounts.length > 0 && filteredAccounts.every(a => selectedIds.has(a.id))}
+                            onChange={handleToggleAll}
+                        />
+                    </div>
+                    <div className="col-drag"></div>
+                    <div className="col-email">邮箱</div>
+                    <div className="col-quota-merged">模型配额</div>
+                    <div className="col-time">时间状态</div>
+                    <div className="col-renew">Auth状态</div>
+                    <div className="col-actions">操作</div>
                 </div>
-                <div className="col-drag"></div>
-                <div className="col-email">邮箱</div>
-                <div className="col-quota-merged">模型配额</div>
-                <div className="col-time">时间状态</div>
-                <div className="col-actions">操作</div>
-            </div>
 
-            {/* 账号列表 */}
-            <div className="account-table-body">
-                {filteredAccounts.map(account => {
-                    const usage = usageMap[account.id];
-                    const isSelected = selectedIds.has(account.id);
-                    const isRefreshing = refreshingIds.has(account.id);
+                {/* 账号列表 */}
+                <div className="account-table-body">
+                    {filteredAccounts.map(account => {
+                        const usage = usageMap[account.id];
+                        const isSelected = selectedIds.has(account.id);
+                        const isRefreshing = refreshingIds.has(account.id);
                     const isCurrent = account.id === currentId;
 
                     const isInvalid = invalidIds.has(account.id);
+                    const identityCheck = checkIdentityConsistency(account.name, account.auth_json);
+                    const lastRefresh = extractLastRefresh(account.auth_json);
+                    const renewMissing = !lastRefresh;
+                    const keepaliveEnabled = account.keepalive?.inactive_refresh_enabled !== false;
+                    const keepaliveLastAttempt = account.keepalive?.last_attempt_at ?? null;
+                    const keepaliveLastSuccess = account.keepalive?.last_success_at ?? null;
+                    const keepaliveLastError = account.keepalive?.last_error ?? null;
+                    const keepaliveStatus = getKeepaliveStatusText(isCurrent, keepaliveEnabled, keepaliveLastError);
+                    const nextRefreshInfo = getNextRefreshInfo(isCurrent, keepaliveEnabled, lastRefresh);
 
                     return (
                         <div
                             key={account.id}
-                            className={`account-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''} ${isInvalid ? 'invalid' : ''}`}
+                            className={`account-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''} ${isInvalid ? 'invalid' : ''} ${identityCheck.inconsistent ? 'identity-conflict' : ''}`}
                         >
-                            <div className="col-checkbox">
-                                <input
-                                    type="checkbox"
-                                    className="custom-checkbox"
-                                    checked={isSelected}
-                                    onChange={() => handleToggleSelect(account.id)}
-                                />
-                            </div>
-                            <div className="col-drag">
-                                <span className="drag-handle">⋮⋮</span>
-                            </div>
-                            <div className="col-email">
+                                <div className="col-checkbox">
+                                    <input
+                                        type="checkbox"
+                                        className="custom-checkbox"
+                                        checked={isSelected}
+                                        onChange={() => handleToggleSelect(account.id)}
+                                    />
+                                </div>
+                                <div className="col-drag">
+                                    <span className="drag-handle">⋮⋮</span>
+                                </div>
+                                <div className="col-email">
                                 <span className="email-text">{account.name}</span>
                                 {isCurrent && <span className="badge current">当前</span>}
                                 {isInvalid && <span className="badge invalid" title="授权已失效，请删除后重新登录">⚠️ 失效</span>}
+                                {identityCheck.inconsistent && (
+                                    <span
+                                        className="badge identity-conflict"
+                                        title={identityCheck.reasons.join('\n')}
+                                    >
+                                        身份异常
+                                    </span>
+                                )}
                                 {usage?.plan_type && (
                                     <span className="badge plan">{usage.plan_type.toUpperCase()}</span>
                                 )}
-                            </div>
-
-                            <div className="col-quota-merged">
-                                {usage ? (
-                                    <div className="quota-grid">
-                                        {renderQuotaItem('5H 限额', usage.five_hour_left, usage.five_hour_reset)}
-                                        {renderQuotaItem('周限额', usage.weekly_left, usage.weekly_reset)}
-                                    </div>
-                                ) : (
-                                    <span className="quota-empty">- 暂无配额信息 -</span>
-                                )}
-                            </div>
-                            <div className="col-time">
-                                <div className="time-item">
-                                    <span className="time-label">使用:</span>
-                                    <span className="time-val">{formatLastUsed(account.last_used)}</span>
                                 </div>
-                                {account.cached_quota?.updated_at && (
-                                    <div className="time-item refresh">
-                                        <span className="time-label">刷新:</span>
-                                        <span className="time-val">{formatLastUsed(account.cached_quota.updated_at)}</span>
+
+                                <div className="col-quota-merged">
+                                    {usage ? (
+                                        <div className="quota-grid">
+                                            {renderQuotaItem(usage.five_hour_label, usage.five_hour_left, usage.five_hour_reset)}
+                                            {renderQuotaItem(usage.weekly_label, usage.weekly_left, usage.weekly_reset)}
+                                        </div>
+                                    ) : (
+                                        <span className="quota-empty">- 暂无配额信息 -</span>
+                                    )}
+                                </div>
+                                <div className="col-time">
+                                    <div className="time-item">
+                                        <span className="time-label">使用:</span>
+                                        <span className="time-val">{formatLastUsed(account.last_used)}</span>
                                     </div>
-                                )}
-                            </div>
-                            <div className="col-actions">
-                                <button
-                                    className="action-btn refresh"
-                                    onClick={() => handleRefreshOne(account.id)}
-                                    disabled={isRefreshing}
-                                    title="刷新配额"
-                                >
-                                    <RefreshCw className={`icon ${isRefreshing ? 'spinning' : ''}`} />
-                                </button>
-
-                                {!isCurrent && (
+                                    {account.cached_quota?.updated_at && (
+                                        <div className="time-item refresh">
+                                            <span className="time-label">刷新:</span>
+                                            <span className="time-val">{formatLastUsed(account.cached_quota.updated_at)}</span>
+                                        </div>
+                                    )}
+                                </div>
+                                <div className={`col-renew ${renewMissing ? 'missing' : ''}`}>
+                                    <div className="time-item">
+                                        <span className="time-label">同步:</span>
+                                        <span className="time-val">{renewMissing ? '缺失' : formatDateValue(lastRefresh)}</span>
+                                    </div>
+                                    <div className="time-item renew">
+                                        <span className="time-label">保活:</span>
+                                        <span className={`time-val ${keepaliveStatus.warn ? 'warn' : ''}`}>
+                                            {keepaliveStatus.text}
+                                        </span>
+                                    </div>
+                                    <div className="time-item renew">
+                                        <span className="time-label">下次:</span>
+                                        <span className={`time-val ${nextRefreshInfo.warn ? 'warn' : ''}`}>
+                                            {nextRefreshInfo.text}
+                                        </span>
+                                    </div>
+                                    <div className="time-item renew">
+                                        <span className="time-label">尝试:</span>
+                                        <span className="time-val">{formatDateValue(keepaliveLastAttempt)}</span>
+                                    </div>
+                                    <div className="time-item renew">
+                                        <span className="time-label">成功:</span>
+                                        <span className="time-val">{formatDateValue(keepaliveLastSuccess)}</span>
+                                    </div>
+                                    <div className="time-item renew">
+                                        <span className="time-label">错误:</span>
+                                        <span className={`time-val ${keepaliveLastError ? 'warn' : ''}`}>
+                                            {formatKeepaliveError(keepaliveLastError)}
+                                        </span>
+                                    </div>
+                                </div>
+                                <div className="col-actions">
                                     <button
-                                        className="action-btn switch"
-                                        onClick={() => onSwitch(account.id)}
-                                        title="切换账号"
+                                        className="action-btn refresh"
+                                        onClick={() => handleRefreshOne(account.id)}
+                                        disabled={isRefreshing}
+                                        title="刷新配额"
                                     >
-                                        <ArrowLeftRight className="icon" />
+                                        <RefreshCw className={`icon ${isRefreshing ? 'spinning' : ''}`} />
                                     </button>
-                                )}
-                                <button
-                                    className="action-btn delete"
-                                    onClick={() => onDelete(account.id)}
-                                    title="删除账号"
-                                >
-                                    <Trash2 className="icon" />
-                                </button>
-                            </div>
 
-                        </div>
-                    );
-                })}
+                                    {!isCurrent && (
+                                        <button
+                                            className={`action-btn keepalive ${keepaliveEnabled ? 'on' : 'off'}`}
+                                            onClick={() => onSetInactiveRefreshEnabled(account.id, !keepaliveEnabled)}
+                                            title={keepaliveEnabled ? '停用该账号独占保活' : '启用该账号独占保活'}
+                                        >
+                                            {keepaliveEnabled ? <ShieldCheck className="icon" /> : <ShieldOff className="icon" />}
+                                        </button>
+                                    )}
+
+                                    {!isCurrent && (
+                                        <button
+                                            className="action-btn switch"
+                                            onClick={() => onSwitch(account.id)}
+                                            title="切换账号"
+                                        >
+                                            <ArrowLeftRight className="icon" />
+                                        </button>
+                                    )}
+                                    <button
+                                        className="action-btn delete"
+                                        onClick={() => onDelete(account.id)}
+                                        title="删除账号"
+                                    >
+                                        <Trash2 className="icon" />
+                                    </button>
+                                </div>
+
+                            </div>
+                        );
+                    })}
+                </div>
             </div>
 
             {/* 底部统计 */}
@@ -494,4 +717,3 @@ export function AccountList({
         </div>
     );
 }
-
