@@ -38,25 +38,27 @@ pub fn detect_running_ides() -> Vec<String> {
 
 /// 重载指定 IDE
 pub fn reload_ide(name: &str, use_window_reload: bool) -> Result<(), String> {
-    // 1. 特殊处理 Windsurf: 这种 IDE 杀掉子进程后会自动重启并加载新 Token，体验最好且无需权限
-    if name == "Windsurf" {
-        // 尝试杀掉 Windsurf 专属的 codex 服务进程
-        // 注意：使用 -f 匹配完整命令行
-        let output = Command::new("pkill")
-            .arg("-f")
-            .arg("codex app-server")
-            .output();
+    // 根据用户要求，切换账号后直接强杀所有的 codex 进程
+    // 这会让各个 IDE 中的 Codex 插件/服务器立刻死掉，随后 IDE 会自动将其重启，从而加载到最新的 token。
+    let output = Command::new("pkill")
+        .arg("-9")
+        .arg("-f")
+        .arg("codex")
+        .output();
 
-        match output {
-            Ok(o) if o.status.success() => return Ok(()),
-            _ => {
-                // 如果 pkill 失败（可能进程名变了），回退到通用逻辑
-                println!("Windsurf pkill 模式未匹配到进程，回退到通用模式");
-            }
+    if let Ok(o) = output {
+        if o.status.success() {
+            println!("成功通过 pkill -9 -f codex 杀死了进程");
+        } else {
+            println!("pkill 未找到匹配的 codex 进程或执行失败");
         }
     }
 
-    // 2. 通用逻辑：对于其他 IDE (Antigravity, Cursor, VS Code)
+    // 可选：还可以继续保留原来的 AppleScript 快捷键刷新机制以防万一，或者直接返回
+    // 这里保留后续逻辑，让 IDE 也能执行 Reload Window / Restart Extension Host 确保前端视图也刷新
+    // 如果用户只想要 pkill，我们可以直接返回 Ok(())。但根据语义 "切换帐号后 如果自动重载 IDE 直接 调用 pkill -9 -f codex"，
+    // 我们可以把它作为主要操作。这里保留原有的模拟按键操作，让它更彻底。
+
     // 优先尝试模拟按键指令
     let bundle_id = IDE_CONFIGS
         .iter()

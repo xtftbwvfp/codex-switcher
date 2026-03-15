@@ -21,7 +21,7 @@ interface AccountListProps {
     accounts: Account[];
     currentId: string | null;
     settings: AppSettings;
-    onSwitch: (id: string) => void;
+    onSwitch: (id: string) => void | Promise<void>;
     onDelete: (id: string) => void;
     onSetInactiveRefreshEnabled: (id: string, enabled: boolean) => void;
     onUpdateSettings: (settings: AppSettings) => void;
@@ -51,6 +51,7 @@ export function AccountList({
 }: AccountListProps) {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
+    const [switchingIds, setSwitchingIds] = useState<Set<string>>(new Set());
     const [usageMap, setUsageMap] = useState<Record<string, UsageData>>({});
     const [isRefreshingAll, setIsRefreshingAll] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -499,6 +500,12 @@ export function AccountList({
                     >
                         TEAM <span className="filter-count">{filterCounts.team}</span>
                     </button>
+                    <button
+                        className={`filter-btn ${filter === 'free' ? 'active' : ''}`}
+                        onClick={() => setFilter('free')}
+                    >
+                        FREE <span className="filter-count">{filterCounts.free}</span>
+                    </button>
                 </div>
 
                 <div className="toolbar-spacer"></div>
@@ -563,24 +570,25 @@ export function AccountList({
                         const usage = usageMap[account.id];
                         const isSelected = selectedIds.has(account.id);
                         const isRefreshing = refreshingIds.has(account.id);
-                    const isCurrent = account.id === currentId;
+                        const isSwitching = switchingIds.has(account.id);
+                        const isCurrent = account.id === currentId;
 
-                    const isInvalid = invalidIds.has(account.id);
-                    const identityCheck = checkIdentityConsistency(account.name, account.auth_json);
-                    const lastRefresh = extractLastRefresh(account.auth_json);
-                    const renewMissing = !lastRefresh;
-                    const keepaliveEnabled = account.keepalive?.inactive_refresh_enabled !== false;
-                    const keepaliveLastAttempt = account.keepalive?.last_attempt_at ?? null;
-                    const keepaliveLastSuccess = account.keepalive?.last_success_at ?? null;
-                    const keepaliveLastError = account.keepalive?.last_error ?? null;
-                    const keepaliveStatus = getKeepaliveStatusText(isCurrent, keepaliveEnabled, keepaliveLastError);
-                    const nextRefreshInfo = getNextRefreshInfo(isCurrent, keepaliveEnabled, lastRefresh);
+                        const isInvalid = invalidIds.has(account.id);
+                        const identityCheck = checkIdentityConsistency(account.name, account.auth_json);
+                        const lastRefresh = extractLastRefresh(account.auth_json);
+                        const renewMissing = !lastRefresh;
+                        const keepaliveEnabled = account.keepalive?.inactive_refresh_enabled !== false;
+                        const keepaliveLastAttempt = account.keepalive?.last_attempt_at ?? null;
+                        const keepaliveLastSuccess = account.keepalive?.last_success_at ?? null;
+                        const keepaliveLastError = account.keepalive?.last_error ?? null;
+                        const keepaliveStatus = getKeepaliveStatusText(isCurrent, keepaliveEnabled, keepaliveLastError);
+                        const nextRefreshInfo = getNextRefreshInfo(isCurrent, keepaliveEnabled, lastRefresh);
 
-                    return (
-                        <div
-                            key={account.id}
-                            className={`account-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''} ${isInvalid ? 'invalid' : ''} ${identityCheck.inconsistent ? 'identity-conflict' : ''}`}
-                        >
+                        return (
+                            <div
+                                key={account.id}
+                                className={`account-row ${isSelected ? 'selected' : ''} ${isCurrent ? 'current' : ''} ${isInvalid ? 'invalid' : ''} ${identityCheck.inconsistent ? 'identity-conflict' : ''}`}
+                            >
                                 <div className="col-checkbox">
                                     <input
                                         type="checkbox"
@@ -593,20 +601,20 @@ export function AccountList({
                                     <span className="drag-handle">⋮⋮</span>
                                 </div>
                                 <div className="col-email">
-                                <span className="email-text">{account.name}</span>
-                                {isCurrent && <span className="badge current">当前</span>}
-                                {isInvalid && <span className="badge invalid" title="授权已失效，请删除后重新登录">⚠️ 失效</span>}
-                                {identityCheck.inconsistent && (
-                                    <span
-                                        className="badge identity-conflict"
-                                        title={identityCheck.reasons.join('\n')}
-                                    >
-                                        身份异常
-                                    </span>
-                                )}
-                                {usage?.plan_type && (
-                                    <span className="badge plan">{usage.plan_type.toUpperCase()}</span>
-                                )}
+                                    <span className="email-text">{account.name}</span>
+                                    {isCurrent && <span className="badge current">当前</span>}
+                                    {isInvalid && <span className="badge invalid" title="授权已失效，请删除后重新登录">⚠️ 失效</span>}
+                                    {identityCheck.inconsistent && (
+                                        <span
+                                            className="badge identity-conflict"
+                                            title={identityCheck.reasons.join('\n')}
+                                        >
+                                            身份异常
+                                        </span>
+                                    )}
+                                    {usage?.plan_type && (
+                                        <span className="badge plan">{usage.plan_type.toUpperCase()}</span>
+                                    )}
                                 </div>
 
                                 <div className="col-quota-merged">
@@ -686,10 +694,22 @@ export function AccountList({
                                     {!isCurrent && (
                                         <button
                                             className="action-btn switch"
-                                            onClick={() => onSwitch(account.id)}
+                                            onClick={async () => {
+                                                setSwitchingIds(prev => new Set(prev).add(account.id));
+                                                try {
+                                                    await onSwitch(account.id);
+                                                } finally {
+                                                    setSwitchingIds(prev => {
+                                                        const next = new Set(prev);
+                                                        next.delete(account.id);
+                                                        return next;
+                                                    });
+                                                }
+                                            }}
+                                            disabled={isSwitching}
                                             title="切换账号"
                                         >
-                                            <ArrowLeftRight className="icon" />
+                                            <ArrowLeftRight className={`icon ${isSwitching ? 'spinning' : ''}`} />
                                         </button>
                                     )}
                                     <button

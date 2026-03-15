@@ -57,7 +57,6 @@ export function useAccounts() {
     // 加载账号和设置
     const loadData = useCallback(async () => {
         try {
-            setLoading(true);
             setError(null);
 
             const [accountList, current, appSettings] = await Promise.all([
