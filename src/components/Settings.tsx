@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { Palette, Server, Monitor, Wrench, Save } from 'lucide-react';
 import './Settings.css';
 
 interface AppSettings {
@@ -9,6 +10,7 @@ interface AppSettings {
     background_refresh: boolean;
     refresh_interval_minutes: number;
     inactive_refresh_days: number;
+    theme_palette: string;
 }
 
 const IDE_OPTIONS = [
@@ -27,10 +29,11 @@ export function Settings() {
         background_refresh: false,
         refresh_interval_minutes: 30,
         inactive_refresh_days: 7,
+        theme_palette: 'github',
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
-    const [message, setMessage] = useState<string | null>(null);
+    const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
     useEffect(() => {
         loadSettings();
@@ -50,10 +53,10 @@ export function Settings() {
         setMessage(null);
         try {
             await invoke('update_settings', { settings });
-            setMessage('✅ 设置已保存');
+            setMessage({ type: 'success', text: '✅ 设置已保存' });
             setTimeout(() => setMessage(null), 3000);
         } catch (e) {
-            setMessage(`❌ 保存失败: ${e}`);
+            setMessage({ type: 'error', text: `❌ 保存失败: ${e}` });
         } finally {
             setSaving(false);
         }
@@ -91,14 +94,38 @@ export function Settings() {
                     onClick={saveSettings}
                     disabled={saving}
                 >
+                    <Save size={14} />
                     {saving ? '保存中...' : '保存设置'}
                 </button>
             </div>
 
-            {message && <div className="settings-message">{message}</div>}
+            {message && (
+                <div className={`settings-message ${message.type}`}>
+                    {message.text}
+                </div>
+            )}
 
             <div className="settings-section">
-                <h3>后台服务</h3>
+                <h3><Palette size={16} /> 界面外观</h3>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">界面配色</span>
+                        <span className="setting-desc">主界面颜色的色调风格</span>
+                    </div>
+                    <select
+                        className="select-input"
+                        value={settings.theme_palette}
+                        onChange={e => updateField('theme_palette', e.target.value)}
+                    >
+                        <option value="midnight">暗黑护眼</option>
+                        <option value="github">经典蓝</option>
+                        <option value="agate">玛瑙绿</option>
+                    </select>
+                </div>
+            </div>
+
+            <div className="settings-section">
+                <h3><Server size={16} /> 后台服务</h3>
 
                 <div className="setting-item">
                     <div className="setting-info">
@@ -112,7 +139,9 @@ export function Settings() {
                             onChange={e => updateField('background_refresh', e.target.checked)}
                         />
                         <span className="toggle-slider"></span>
-                        <span className="toggle-text">{settings.background_refresh ? '已开启' : '已关闭'}</span>
+                        <span className={`toggle-text ${settings.background_refresh ? 'on' : ''}`}>
+                            {settings.background_refresh ? '已开启' : '已关闭'}
+                        </span>
                     </label>
                 </div>
 
@@ -150,7 +179,7 @@ export function Settings() {
             </div>
 
             <div className="settings-section">
-                <h3>IDE 重载</h3>
+                <h3><Monitor size={16} /> IDE 重载</h3>
 
                 <div className="setting-item">
                     <div className="setting-info">
@@ -203,8 +232,8 @@ export function Settings() {
                 )}
             </div>
 
-            <div className="settings-section">
-                <h3>故障修复</h3>
+            <div className="settings-section danger">
+                <h3><Wrench size={16} /> 故障修复</h3>
                 <div className="setting-item">
                     <div className="setting-info">
                         <span className="setting-label">修复 Codex App 闪退</span>

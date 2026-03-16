@@ -35,6 +35,14 @@ pub struct AppSettings {
     /// 非活跃账号在距离失效前多少天开始保活刷新
     #[serde(default = "default_inactive_refresh_days")]
     pub inactive_refresh_days: u32,
+
+    /// 界面配色方案
+    #[serde(default = "default_theme_palette")]
+    pub theme_palette: String,
+}
+
+fn default_theme_palette() -> String {
+    "midnight".to_string()
 }
 
 fn default_primary_ide() -> String {
@@ -62,6 +70,7 @@ impl Default for AppSettings {
             background_refresh: false,
             refresh_interval_minutes: default_refresh_interval(),
             inactive_refresh_days: default_inactive_refresh_days(),
+            theme_palette: default_theme_palette(),
         }
     }
 }
@@ -124,10 +133,12 @@ impl Default for KeepaliveState {
 pub struct CachedQuota {
     pub five_hour_left: f64,
     pub five_hour_reset: String,
+    pub five_hour_reset_at: Option<i64>,
     #[serde(default = "default_five_hour_label")]
     pub five_hour_label: String,
     pub weekly_left: f64,
     pub weekly_reset: String,
+    pub weekly_reset_at: Option<i64>,
     #[serde(default = "default_weekly_label")]
     pub weekly_label: String,
     pub plan_type: String,
@@ -471,6 +482,28 @@ impl AccountStore {
             .ok()?;
         let json_str = String::from_utf8(decoded).ok()?;
         serde_json::from_str(&json_str).ok()
+    }
+
+    /// 从原始 Token 字符串提取 JWT Claims
+    pub fn extract_jwt_claims_from_token(token: &str) -> Result<Value, String> {
+        let parts: Vec<&str> = token.split('.').collect();
+        if parts.len() != 3 {
+            return Err("无效的 Token 格式".to_string());
+        }
+
+        use base64::Engine;
+        let payload_part = parts[1];
+        let mut padded = payload_part.to_string();
+        while !padded.len().is_multiple_of(4) {
+            padded.push('=');
+        }
+
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_part)
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&padded))
+            .map_err(|e| format!("Base64 解码失败: {}", e))?;
+        let json_str = String::from_utf8(decoded).map_err(|e| format!("UTF-8 转换失败: {}", e))?;
+        serde_json::from_str(&json_str).map_err(|e| format!("JSON 解析失败: {}", e))
     }
 
     /// 从 auth_json 中提取邮箱（优先 id_token claims）

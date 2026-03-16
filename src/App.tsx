@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
+import { save, open } from '@tauri-apps/plugin-dialog';
+import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
 import { useAccounts } from './hooks/useAccounts';
 import { useUsage } from './hooks/useUsage';
 import { AddAccountModal } from './components/AddAccountModal';
@@ -91,6 +93,18 @@ function App() {
     };
   }, []);
 
+  // 监听设置更新事件
+  useEffect(() => {
+    const unlisten = listen('settings-updated', () => {
+      console.log('[Frontend] 收到设置更新通知，重新加载设置');
+      refresh();
+    });
+
+    return () => {
+      unlisten.then(f => f());
+    };
+  }, [refresh]);
+
   // 执行真正的切换逻辑
   const performSwitch = async (id: string) => {
     await switchTo(id);
@@ -145,40 +159,46 @@ function App() {
   const handleExport = async () => {
     try {
       const json = await exportAccounts();
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `codex-accounts-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const path = await save({
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }],
+        defaultPath: `codex-accounts-${new Date().toISOString().slice(0, 10)}.json`
+      });
+
+      if (path) {
+        await writeTextFile(path, json);
+        alert('导出成功！');
+      }
     } catch (err) {
       alert('导出失败: ' + String(err));
     }
   };
 
   const handleImport = async () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{
+          name: 'JSON',
+          extensions: ['json']
+        }]
+      });
 
-      try {
-        const text = await file.text();
+      if (selected && !Array.isArray(selected)) {
+        const text = await readTextFile(selected);
         await importAccounts(text);
         alert('导入成功！');
-      } catch (err) {
-        alert('导入失败: ' + String(err));
       }
-    };
-    input.click();
+    } catch (err) {
+      alert('导入失败: ' + String(err));
+    }
   };
 
   if (loading) {
     return (
-      <div className="app">
+      <div className="app" data-palette={settings.theme_palette || 'github'}>
         <div className="loading">
           <div className="spinner" />
           <p>加载中...</p>
@@ -188,7 +208,7 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app" data-palette={settings.theme_palette || 'github'}>
       {/* 顶部标题栏 */}
       <header className="app-header">
         <div className="header-left">

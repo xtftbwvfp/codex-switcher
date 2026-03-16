@@ -14,23 +14,31 @@
 .settings-header h2 {
     margin: 0;
     font-size: 1.5rem;
-    font-weight: 600;
+    font-weight: 700;
+    color: var(--text-primary);
 }
 
+/* ===== 保存按钮 ===== */
 .save-button {
-    padding: 8px 20px;
-    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 24px;
+    background: var(--primary-color);
     color: white;
     border: none;
     border-radius: 8px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
     cursor: pointer;
     transition: all 0.2s ease;
 }
 
 .save-button:hover:not(:disabled) {
+    background: var(--primary-hover);
     transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .save-button:disabled {
@@ -38,67 +46,128 @@
     cursor: not-allowed;
 }
 
+/* ===== 修复按钮 ===== */
 .action-button.warning {
     padding: 8px 16px;
     background: rgba(239, 68, 68, 0.1);
-    color: #f87171;
-    border: 1px solid rgba(239, 68, 68, 0.2);
+    color: var(--danger-color);
+    border: 1px solid var(--danger-color);
     border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
     cursor: pointer;
     transition: all 0.2s;
 }
 
 .action-button.warning:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.2);
-    border-color: rgba(239, 68, 68, 0.4);
+    transform: translateY(-1px);
 }
 
-.action-button:disabled {
-    opacity: 0.5;
+.action-button.warning:disabled {
+    opacity: 0.6;
     cursor: not-allowed;
 }
 
+/* ===== Toast 消息 ===== */
 .settings-message {
     padding: 12px 16px;
     margin-bottom: 16px;
     border-radius: 8px;
-    background: rgba(59, 130, 246, 0.1);
-    color: #93c5fd;
     font-size: 0.9rem;
+    border: 1px solid transparent;
+    animation: slideDown 0.25s ease-out;
 }
 
+.settings-message.success {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success-color);
+    border-color: rgba(16, 185, 129, 0.25);
+}
+
+.settings-message.error {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger-color);
+    border-color: rgba(239, 68, 68, 0.25);
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ===== 分区容器 (外框) ===== */
 .settings-section {
     background: rgba(255, 255, 255, 0.03);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 32px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
+.settings-section:hover {
+    border-color: color-mix(in srgb, var(--border-color) 70%, var(--primary-color) 30%);
+}
+
+/* 故障修复区域特殊样式 */
+.settings-section.danger .setting-item {
+    border-color: color-mix(in srgb, var(--border-color) 50%, var(--danger-color) 30%);
+}
+
+/* ===== 分区标题 ===== */
 .settings-section h3 {
-    margin: 0 0 16px 0;
-    font-size: 1rem;
+    margin: 0 0 20px 0;
+    font-size: 0.95rem;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.9);
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0.9;
 }
 
+.settings-section.danger h3 {
+    border-bottom-color: var(--danger-color);
+}
+
+/* ===== 设置项 (深色卡片) ===== */
 .setting-item {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 12px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    padding: 16px 20px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    margin-bottom: 12px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+    transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.setting-item:hover {
+    border-color: color-mix(in srgb, var(--border-color) 50%, var(--primary-color) 50%);
+    transform: translateY(-1px);
 }
 
 .setting-item:last-child {
-    border-bottom: none;
+    margin-bottom: 0;
 }
 
+/* 子设置项 — 同样作为卡片，但有微弱缩进或视觉连接 */
 .setting-item.sub-item {
-    padding-left: 20px;
-    background: rgba(255, 255, 255, 0.02);
-    margin: 0 -20px;
-    padding-right: 20px;
+    margin: 0 0 12px 24px;
+    padding: 12px 20px;
+    border-left: 3px solid var(--primary-color);
+    background: color-mix(in srgb, var(--card-bg) 95%, var(--primary-color) 5%);
 }
 
 .setting-info {
@@ -108,16 +177,17 @@
 }
 
 .setting-label {
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.9);
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 14px;
 }
 
 .setting-desc {
     font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--text-muted);
 }
 
-/* Toggle Switch */
+/* ===== Toggle 开关 ===== */
 .toggle {
     position: relative;
     display: inline-flex;
@@ -133,7 +203,7 @@
 .toggle-slider {
     width: 44px;
     height: 24px;
-    background: rgba(255, 255, 255, 0.1);
+    background: var(--input-border);
     border-radius: 12px;
     position: relative;
     transition: all 0.2s ease;
@@ -149,60 +219,67 @@
     top: 3px;
     left: 3px;
     transition: all 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .toggle input:checked+.toggle-slider {
-    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    background: var(--primary-color);
 }
 
 .toggle input:checked+.toggle-slider::after {
     transform: translateX(20px);
 }
 
-.toggle.always-on .toggle-slider {
-    background: rgba(59, 130, 246, 0.5);
-    cursor: not-allowed;
-}
-
 .toggle-text {
     font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.5);
+    color: var(--text-muted);
+    transition: color 0.2s ease;
 }
 
-/* Number Input */
+.toggle-text.on {
+    color: var(--primary-color);
+    font-weight: 500;
+}
+
+/* ===== Number Input ===== */
 .number-input {
     width: 80px;
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
     border-radius: 8px;
-    color: white;
+    color: var(--text-primary);
     font-size: 0.9rem;
     text-align: center;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .number-input:focus {
     outline: none;
-    border-color: #3b82f6;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
-/* Select Input */
+/* ===== Select Input ===== */
 .select-input {
     padding: 8px 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
     border-radius: 8px;
-    color: white;
+    color: var(--text-primary);
     font-size: 0.9rem;
     cursor: pointer;
+    min-width: 140px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .select-input:focus {
     outline: none;
-    border-color: #3b82f6;
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
 .select-input option {
-    background: #1e293b;
-    color: white;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
 }

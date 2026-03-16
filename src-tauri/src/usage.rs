@@ -18,6 +18,8 @@ pub struct UsageDisplay {
     pub five_hour_label: String,
     /// 5小时重置时间描述
     pub five_hour_reset: String,
+    /// 5小时重置时间戳
+    pub five_hour_reset_at: Option<i64>,
     /// 周窗口使用百分比
     pub weekly_used: i32,
     /// 周窗口剩余百分比
@@ -26,6 +28,8 @@ pub struct UsageDisplay {
     pub weekly_label: String,
     /// 周重置时间描述
     pub weekly_reset: String,
+    /// 周重置时间戳
+    pub weekly_reset_at: Option<i64>,
     /// 额度余额
     pub credits_balance: Option<f64>,
     /// 是否有额度
@@ -121,11 +125,11 @@ impl UsageFetcher {
 
         // 解析 5 小时窗口 (Primary)
         let primary_val = rate_limit.and_then(|r| r.get("primary_window"));
-        let (p_used, p_reset, p_label) = Self::parse_window(primary_val, "5H 限额");
+        let (p_used, p_reset, p_label, p_reset_at) = Self::parse_window(primary_val, "5H 限额");
 
         // 解析周窗口 (Secondary)
         let secondary_val = rate_limit.and_then(|r| r.get("secondary_window"));
-        let (s_used, s_reset, s_label) = Self::parse_window(secondary_val, "周限额");
+        let (s_used, s_reset, s_label, s_reset_at) = Self::parse_window(secondary_val, "周限额");
 
         // 解析额度
         let credits = json.get("credits");
@@ -147,10 +151,12 @@ impl UsageFetcher {
             five_hour_left: 100 - p_used,
             five_hour_label: p_label,
             five_hour_reset: p_reset,
+            five_hour_reset_at: p_reset_at,
             weekly_used: s_used,
             weekly_left: 100 - s_used,
             weekly_label: s_label,
             weekly_reset: s_reset,
+            weekly_reset_at: s_reset_at,
             credits_balance,
             has_credits: has_credits || unlimited,
             is_valid_for_cli: true,
@@ -158,10 +164,13 @@ impl UsageFetcher {
     }
 
     /// 解析窗口数据
-    fn parse_window(window: Option<&Value>, default_label: &str) -> (i32, String, String) {
+    fn parse_window(
+        window: Option<&Value>,
+        default_label: &str,
+    ) -> (i32, String, String, Option<i64>) {
         let window = match window {
             Some(w) => w,
-            None => return (0, "未知".to_string(), default_label.to_string()),
+            None => return (0, "未知".to_string(), default_label.to_string(), None),
         };
 
         // 关键修复：使用 f64 解析百分比，然后四舍五入
@@ -174,8 +183,7 @@ impl UsageFetcher {
         let reset_at = window
             .get("reset_at")
             .and_then(Self::parse_number)
-            .map(|f| f as i64)
-            .unwrap_or(0);
+            .map(|f| f as i64);
 
         let limit_window_seconds = window
             .get("limit_window_seconds")
@@ -190,8 +198,12 @@ impl UsageFetcher {
             default_label.to_string()
         };
 
-        let reset_str = if reset_at > 0 {
-            Self::format_reset(reset_at)
+        let reset_str = if let Some(ts) = reset_at {
+            if ts > 0 {
+                Self::format_reset(ts)
+            } else {
+                "未知".to_string()
+            }
         } else {
             // 尝试使用 reset_after_seconds
             let reset_after = window
@@ -207,7 +219,7 @@ impl UsageFetcher {
             }
         };
 
-        (used_percent, reset_str, label)
+        (used_percent, reset_str, label, reset_at)
     }
 
     /// 根据窗口秒数获取人类可读标签
@@ -227,10 +239,19 @@ impl UsageFetcher {
         }
     }
 
-    /// 解析数字（支持字符串和数字，且支持浮点）
+    /// 解析数字（支持字符串和数字）
     fn parse_number(v: &Value) -> Option<f64> {
         match v {
             Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// 解析整数（支持字符串和数字）
+    fn parse_int(v: &Value) -> Option<i32> {
+        match v {
+            Value::Number(n) => n.as_i64().map(|i| i as i32),
             Value::String(s) => s.parse().ok(),
             _ => None,
         }

@@ -4,9 +4,11 @@ import { invoke } from '@tauri-apps/api/core';
 export interface CachedQuota {
     five_hour_left: number;
     five_hour_reset: string;
+    five_hour_reset_at?: number;
     five_hour_label?: string;
     weekly_left: number;
     weekly_reset: string;
+    weekly_reset_at?: number;
     weekly_label?: string;
     plan_type: string;
     is_valid_for_cli?: boolean;
@@ -20,6 +22,7 @@ export interface AppSettings {
     background_refresh: boolean;
     refresh_interval_minutes: number;
     inactive_refresh_days: number;
+    theme_palette: string;
 }
 
 export interface KeepaliveState {
@@ -50,6 +53,7 @@ export function useAccounts() {
         background_refresh: false,
         refresh_interval_minutes: 30,
         inactive_refresh_days: 7,
+        theme_palette: 'midnight',
     });
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

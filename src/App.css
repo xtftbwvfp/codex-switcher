@@ -1,5 +1,99 @@
-/* ===== CSS 变量 ===== */
 :root {
+  --bg-primary: #f6f8fa;
+  --bg-secondary: #ffffff;
+  --card-bg: #ffffff;
+  --border-color: #d0d7de;
+
+  --text-primary: #1f2328;
+  --text-secondary: #636c76;
+  --text-muted: #6e7781;
+
+  --primary-color: #0969da;
+  --primary-hover: #085cc4;
+  --success-color: #1a7f37;
+  --warning-color: #9a6700;
+  --danger-color: #cf222e;
+  --accent-color: #2da44e;
+  --purple-color: #8250df;
+
+  /* Semantic UI Colors */
+  --input-bg: #ffffff;
+  --input-border: #d0d7de;
+  --section-bg: #f6f8fa;
+  --hover-bg: rgba(208, 215, 222, 0.3);
+  --badge-bg: rgba(208, 215, 222, 0.5);
+
+  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+}
+
+/* 玛瑙绿配色覆盖 (浅色) */
+.app[data-palette='agate'] {
+  --bg-primary: #f5f7f6;
+  --border-color: #e5e9e8;
+  --text-primary: #1b211a;
+  --text-secondary: #4a544d;
+  --text-muted: #828c85;
+
+  --primary-color: #628141;
+  --primary-hover: #4a6331;
+  --success-color: #628141;
+  --warning-color: #EBD5AB;
+  --danger-color: #ad5a5a;
+  --accent-color: #8BAE66;
+  --purple-color: #628141;
+
+  --input-bg: #fcfdfc;
+  --input-border: #dbe0de;
+  --section-bg: #f7f9f8;
+  --hover-bg: rgba(139, 174, 102, 0.1);
+  --badge-bg: rgba(98, 129, 65, 0.1);
+}
+
+/* 原生配色 — 同步自 Antigravity-Manager-main (DaisyUI dark) */
+.app[data-palette='midnight'] {
+  --bg-primary: #334155;
+  /* base-300  Slate-700  Layout/Navbar */
+  --bg-secondary: #334155;
+  /* base-300  页眉同色 */
+  --card-bg: #0f172a;
+  /* base-100  Slate-900  卡片/内容区 */
+  --border-color: #1e293b;
+  /* base-200  Slate-800 */
+
+  --text-primary: #e2e8f0;
+  /* Slate-200 */
+  --text-secondary: #94a3b8;
+  /* Slate-400 */
+  --text-muted: #64748b;
+  /* Slate-500 */
+
+  --primary-color: #3b82f6;
+  /* Blue-500  主按钮 */
+  --primary-hover: #2563eb;
+  /* Blue-600 */
+  --success-color: #10b981;
+  /* Emerald-500 */
+  --warning-color: #f59e0b;
+  /* Amber-500 */
+  --danger-color: #ef4444;
+  /* Red-500 */
+  --accent-color: #10b981;
+  /* Emerald-500  DaisyUI accent */
+  --purple-color: #8b5cf6;
+  /* Violet-500 */
+
+  --input-bg: #0f172a;
+  --input-border: #1e293b;
+  --section-bg: #1e293b;
+  --hover-bg: rgba(59, 130, 246, 0.1);
+  --badge-bg: rgba(59, 130, 246, 0.15);
+
+  /* 按钮文字颜色 */
+  --btn-text-on-primary: #ffffff;
+}
+
+[data-theme='dark'] {
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
   --card-bg: #1c2128;
@@ -17,8 +111,20 @@
   --accent-color: #238636;
   --purple-color: #a371f7;
 
-  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
+  --input-bg: rgba(255, 255, 255, 0.05);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --section-bg: rgba(255, 255, 255, 0.03);
+  --hover-bg: rgba(255, 255, 255, 0.05);
+  --badge-bg: rgba(255, 255, 255, 0.1);
+}
+
+/* 玛瑙绿配色覆盖 (深色) */
+.app[data-palette='agate'][data-theme='dark'] {
+  --primary-color: #8BAE66;
+  --primary-hover: #7a9a5a;
+  --success-color: #8BAE66;
+  --accent-color: #628141;
+  --badge-bg: rgba(139, 174, 102, 0.15);
 }
 
 /* ===== 全局样式 ===== */
@@ -42,6 +148,8 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  background: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 .app-header {
@@ -69,9 +177,10 @@ body {
 .header-nav {
   display: flex;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--section-bg);
   padding: 4px;
   border-radius: 8px;
+  border: 1px solid var(--border-color);
 }
 
 .nav-item {
@@ -89,12 +198,12 @@ body {
 
 .nav-item:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hover-bg);
 }
 
 .nav-item.active {
   color: var(--primary-color);
-  background: rgba(88, 166, 255, 0.15);
+  background: var(--badge-bg);
 }
 
 
@@ -379,7 +488,7 @@ body {
 
 .btn-primary {
   background: var(--primary-color);
-  color: #0d1117;
+  color: var(--btn-text-on-primary, #0d1117);
 }
 
 .btn-primary:hover:not(:disabled) {
@@ -388,7 +497,7 @@ body {
 
 .btn-accent {
   background: var(--accent-color);
-  color: white;
+  color: var(--btn-text-on-primary, white);
 }
 
 .btn-accent:hover:not(:disabled) {

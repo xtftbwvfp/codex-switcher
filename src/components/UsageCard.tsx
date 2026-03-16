@@ -1,4 +1,5 @@
 import { UsageDisplay } from '../hooks/useUsage';
+import { useCountdown } from '../hooks/useCountdown';
 import './UsageCard.css';
 
 interface UsageCardProps {
@@ -7,6 +8,7 @@ interface UsageCardProps {
     error: string | null;
     onRefresh: () => void;
 }
+
 
 export function UsageCard({ usage, loading, error, onRefresh }: UsageCardProps) {
     if (loading && !usage) {
@@ -33,12 +35,16 @@ export function UsageCard({ usage, loading, error, onRefresh }: UsageCardProps) 
         return null;
     }
 
+    const fiveHourTimeLeft = useCountdown(usage.five_hour_reset_at);
+    const weeklyTimeLeft = useCountdown(usage.weekly_reset_at);
+    const isFree = usage.plan_type === 'free';
+
     return (
         <div className="usage-meters">
             {/* 5小时配额 */}
             <div className="usage-row">
                 <span className="usage-label">5h 配额</span>
-                <span className="usage-reset">{usage.five_hour_reset}</span>
+                <span className="usage-reset">{fiveHourTimeLeft || usage.five_hour_reset}</span>
                 <span className="usage-percent">{usage.five_hour_left}%</span>
             </div>
             <div className="meter-bar">
@@ -48,18 +54,22 @@ export function UsageCard({ usage, loading, error, onRefresh }: UsageCardProps) 
                 />
             </div>
 
-            {/* 周配额 */}
-            <div className="usage-row">
-                <span className="usage-label">周配额</span>
-                <span className="usage-reset">{usage.weekly_reset}</span>
-                <span className="usage-percent">{usage.weekly_left}%</span>
-            </div>
-            <div className="meter-bar">
-                <div
-                    className={`meter-fill ${getColorClass(usage.weekly_left)}`}
-                    style={{ width: `${usage.weekly_left}%` }}
-                />
-            </div>
+            {/* 周配额 - PRO 账号显示 */}
+            {!isFree && (
+                <>
+                    <div className="usage-row">
+                        <span className="usage-label">周配额</span>
+                        <span className="usage-reset">{weeklyTimeLeft || usage.weekly_reset}</span>
+                        <span className="usage-percent">{usage.weekly_left}%</span>
+                    </div>
+                    <div className="meter-bar">
+                        <div
+                            className={`meter-fill ${getColorClass(usage.weekly_left)}`}
+                            style={{ width: `${usage.weekly_left}%` }}
+                        />
+                    </div>
+                </>
+            )}
 
             {/* 额度 */}
             {usage.has_credits && usage.credits_balance !== null && (

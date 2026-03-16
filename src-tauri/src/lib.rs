@@ -14,7 +14,7 @@ mod usage;
 use account::{Account, AccountStore};
 use chrono::Utc;
 use refresh_lock::RefreshLockManager;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use usage::{UsageDisplay, UsageFetcher};
 
 const QUARANTINE_FIX_TICKET_TTL_SECS: i64 = 120;
@@ -149,7 +149,7 @@ fn update_settings(
     match (previous, settings.background_refresh) {
         (false, true) => {
             if scheduler_handle.is_none() {
-                let handle = scheduler::start(state.store.clone(), app);
+                let handle = scheduler::start(state.store.clone(), app.clone());
                 *scheduler_handle = Some(handle);
             }
         }
@@ -160,7 +160,7 @@ fn update_settings(
         }
         _ => {}
     }
-
+    app.emit("settings-updated", ()).ok();
     Ok(())
 }
 
@@ -366,6 +366,56 @@ async fn switch_account(state: tauri::State<'_, AppState>, id: String) -> Result
         (account.id.clone(), access_token, refresh_token, account_id)
     };
 
+    // 1.5. 检查 JWT 是否过期，如果过期则尝试刷新
+    let (access_token, refresh_token) = {
+        let mut needs_refresh = false;
+        if let Ok(claims) = AccountStore::extract_jwt_claims_from_token(&access_token) {
+            if let Some(exp) = claims.get("exp").and_then(|v| v.as_i64()) {
+                let now = Utc::now().timestamp();
+                // 如果剩余时间小于 5 分钟，则触发刷新
+                if exp - now < 300 {
+                    println!("[Switch] JWT 已过期或即将过期 ({}), 触发自动刷新", exp);
+                    needs_refresh = true;
+                }
+            }
+        } else {
+            println!("[Switch] 无法解析 JWT Claims，尝试盲刷");
+            needs_refresh = true;
+        }
+
+        if needs_refresh && refresh_token.is_some() {
+            if let Some(ref rt) = refresh_token {
+                match oauth::refresh_access_token(rt).await {
+                    Ok(token_res) => {
+                        println!("[Switch] 自动刷新 Token 成功");
+                        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+                        if let Some(account) = store.accounts.get_mut(&target_id) {
+                            AccountStore::apply_refreshed_tokens(
+                                account,
+                                token_res.access_token.clone(),
+                                token_res.refresh_token.clone(),
+                                token_res.id_token,
+                                token_res.expires_in,
+                            );
+                            let _ = store.save();
+                            (token_res.access_token, token_res.refresh_token)
+                        } else {
+                            (access_token, refresh_token)
+                        }
+                    }
+                    Err(e) => {
+                        println!("[Switch] 自动刷新 Token 失败: {}", e);
+                        (access_token, refresh_token)
+                    }
+                }
+            } else {
+                (access_token, refresh_token)
+            }
+        } else {
+            (access_token, refresh_token)
+        }
+    };
+
     // 2. 预检（非阻断）：仅尝试读取配额缓存，不触发本地 refresh_token 刷新。
     // 失败不阻断切换，交由 Codex 在实际请求中按需维护 token 生命周期。
     println!(
@@ -381,9 +431,11 @@ async fn switch_account(state: tauri::State<'_, AppState>, id: String) -> Result
                 account.cached_quota = Some(account::CachedQuota {
                     five_hour_left: usage.five_hour_left as f64,
                     five_hour_reset: usage.five_hour_reset.clone(),
+                    five_hour_reset_at: usage.five_hour_reset_at,
                     five_hour_label: usage.five_hour_label.clone(),
                     weekly_left: usage.weekly_left as f64,
                     weekly_reset: usage.weekly_reset.clone(),
+                    weekly_reset_at: usage.weekly_reset_at,
                     weekly_label: usage.weekly_label.clone(),
                     plan_type: usage.plan_type.clone(),
                     is_valid_for_cli: usage.is_valid_for_cli,
@@ -570,9 +622,11 @@ async fn get_quota_by_id(
             account.cached_quota = Some(account::CachedQuota {
                 five_hour_left: usage.five_hour_left as f64,
                 five_hour_reset: usage.five_hour_reset.clone(),
+                five_hour_reset_at: usage.five_hour_reset_at,
                 five_hour_label: usage.five_hour_label.clone(),
                 weekly_left: usage.weekly_left as f64,
                 weekly_reset: usage.weekly_reset.clone(),
+                weekly_reset_at: usage.weekly_reset_at,
                 weekly_label: usage.weekly_label.clone(),
                 plan_type: usage.plan_type.clone(),
                 is_valid_for_cli: usage.is_valid_for_cli,
@@ -587,9 +641,11 @@ async fn get_quota_by_id(
             account.cached_quota = Some(account::CachedQuota {
                 five_hour_left: usage.five_hour_left as f64,
                 five_hour_reset: usage.five_hour_reset.clone(),
+                five_hour_reset_at: usage.five_hour_reset_at,
                 five_hour_label: usage.five_hour_label.clone(),
                 weekly_left: usage.weekly_left as f64,
                 weekly_reset: usage.weekly_reset.clone(),
+                weekly_reset_at: usage.weekly_reset_at,
                 weekly_label: usage.weekly_label.clone(),
                 plan_type: usage.plan_type.clone(),
                 is_valid_for_cli: usage.is_valid_for_cli,
@@ -639,6 +695,8 @@ async fn reload_ide_windows(use_window_reload: bool) -> Result<Vec<String>, Stri
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState::new())
         .setup(|app| {
             // 初始化系统托盘
