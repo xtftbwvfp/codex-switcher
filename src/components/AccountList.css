@@ -213,12 +213,18 @@
 
 .col-email {
     flex: 1;
-    min-width: 150px;
+    min-width: 200px;
     display: flex;
     align-items: center;
     gap: 8px;
     overflow: hidden;
     padding-right: 16px;
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.col-email:hover {
+    background: rgba(255, 255, 255, 0.05);
 }
 
 .email-text {
@@ -252,6 +258,34 @@
     background: rgba(239, 68, 68, 0.2);
     color: #ef4444;
     cursor: help;
+}
+
+.badge.copy-success {
+    background: rgba(88, 166, 255, 0.2);
+    color: var(--primary-color);
+    animation: fadeInOut 2s ease forwards;
+}
+
+@keyframes fadeInOut {
+    0% {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    15% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+    85% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+    100% {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
 }
 
 .account-row.invalid {

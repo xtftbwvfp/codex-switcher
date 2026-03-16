@@ -43,6 +43,7 @@ export function AccountList({
 }: AccountListProps) {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
+    const [copiedId, setCopiedId] = useState<string | null>(null);
     const [switchingIds] = useState<Set<string>>(new Set());
     const [usageMap, setUsageMap] = useState<Record<string, UsageData>>({});
     const [isRefreshingAll, setIsRefreshingAll] = useState(false);
@@ -52,6 +53,13 @@ export function AccountList({
 
     const autoReload = settings.auto_reload_ide;
     const setAutoReload = (val: boolean) => onUpdateSettings({ ...settings, auto_reload_ide: val });
+
+    const handleCopy = (id: string, text: string) => {
+        navigator.clipboard.writeText(text).then(() => {
+            setCopiedId(id);
+            setTimeout(() => setCopiedId(null), 2000);
+        });
+    };
 
     // 初始化数据
     useEffect(() => {
@@ -118,11 +126,11 @@ export function AccountList({
 
     const parseDuration = (str?: string) => {
         if (!str || str === '未知' || str === 'N/A') return { text: 'N/A', hours: 999 };
-        if (str === '即将重置') return { text: 'Soon', hours: 0 };
+        if (str === '即将重置') return { text: '重置中', hours: 0 };
         const matches = { d: str.match(/(\d+)天/), h: str.match(/(\d+)小时/), m: str.match(/(\d+)分钟/) };
         const d = parseInt(matches.d?.[1] || '0'), h = parseInt(matches.h?.[1] || '0'), m = parseInt(matches.m?.[1] || '0');
         const totalH = d * 24 + h + m / 60;
-        const compact = d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+        const compact = d > 0 ? `${d}天 ${h}时` : h > 0 ? `${h}时 ${m}分` : `${m}分`;
         return { text: compact || 'N/A', hours: totalH };
     };
 
@@ -250,9 +258,10 @@ export function AccountList({
                                     <input type="checkbox" className="custom-checkbox" checked={selectedIds.has(acc.id)} onChange={() => { const s = new Set(selectedIds); s.has(acc.id) ? s.delete(acc.id) : s.add(acc.id); setSelectedIds(s); }} />
                                 </div>
                                 <div className="col-drag"><span className="drag-handle">⋮⋮</span></div>
-                                <div className="col-email">
+                                <div className="col-email" onClick={() => handleCopy(acc.id, acc.name)} title="点击复制账号">
                                     <span className="email-text">{acc.name}</span>
                                     <div className="badges" style={{ display: 'flex', gap: '4px', marginLeft: '8px' }}>
+                                        {copiedId === acc.id && <span className="badge copy-success">已复制</span>}
                                         {isCurrent && <span className="badge current">当前</span>}
                                         {isInvalid && <span className="badge invalid">失效</span>}
                                         {usage?.plan_type && <span className="badge plan">{usage.plan_type.toUpperCase()}</span>}

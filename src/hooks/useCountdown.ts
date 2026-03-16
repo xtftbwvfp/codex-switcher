@@ -22,19 +22,19 @@ export function useCountdown(resetAt?: number) {
                 return;
             }
 
-            const hours = Math.floor(diff / 3600);
+            const days = Math.floor(diff / 86400);
+            const hours = Math.floor((diff % 86400) / 3600);
             const minutes = Math.floor((diff % 3600) / 60);
             const seconds = diff % 60;
 
-            if (hours > 24) {
-                const days = Math.floor(hours / 24);
-                setTimeLeft(`${days} 天后重置`);
+            if (days > 0) {
+                setTimeLeft(`${days}天 ${hours}小时 ${minutes}分钟 后重置`);
             } else if (hours > 0) {
-                setTimeLeft(`${hours}h ${minutes}m ${seconds}s 后重置`);
+                setTimeLeft(`${hours}小时 ${minutes}分钟 ${seconds}秒 后重置`);
             } else if (minutes > 0) {
-                setTimeLeft(`${minutes}m ${seconds}s 后重置`);
+                setTimeLeft(`${minutes}分钟 ${seconds}秒 后重置`);
             } else {
-                setTimeLeft(`${seconds}s 后重置`);
+                setTimeLeft(`${seconds}秒 后重置`);
             }
         };
 
@@ -67,15 +67,18 @@ export function useShortCountdown(resetAt?: number) {
                 return;
             }
 
-            const hours = Math.floor(diff / 3600);
+            const days = Math.floor(diff / 86400);
+            const hours = Math.floor((diff % 86400) / 3600);
             const minutes = Math.floor((diff % 3600) / 60);
 
-            if (hours > 0) {
-                setTimeLeft(`${hours}h ${minutes}m`);
+            if (days > 0) {
+                setTimeLeft(`${days}天 ${hours}时 ${minutes}分`);
+            } else if (hours > 0) {
+                setTimeLeft(`${hours}时 ${minutes}分`);
             } else if (minutes > 0) {
-                setTimeLeft(`${minutes}m`);
+                setTimeLeft(`${minutes}分`);
             } else {
-                setTimeLeft(`${diff}s`);
+                setTimeLeft(`${diff}秒`);
             }
         };
 
