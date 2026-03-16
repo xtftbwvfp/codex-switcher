@@ -11,6 +11,7 @@ interface AppSettings {
     refresh_interval_minutes: number;
     inactive_refresh_days: number;
     theme_palette: string;
+    allow_auto_switch_to_free: boolean;
 }
 
 const IDE_OPTIONS = [
@@ -29,7 +30,8 @@ export function Settings() {
         background_refresh: false,
         refresh_interval_minutes: 30,
         inactive_refresh_days: 7,
-        theme_palette: 'github',
+        theme_palette: 'midnight',
+        allow_auto_switch_to_free: false,
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
@@ -145,38 +147,55 @@ export function Settings() {
                     </label>
                 </div>
 
-                {settings.background_refresh && (
-                    <>
-                        <div className="setting-item sub-item">
-                            <div className="setting-info">
-                                <span className="setting-label">调度间隔（分钟）</span>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">智能切号允许 FREE 账号</span>
+                        <span className="setting-desc">点击“切换下一个账号”时，是否允许自动寻找并切到 FREE 账号（默认优先付费账号）</span>
+                    </div>
+                    <label className="toggle">
+                        <input
+                            type="checkbox"
+                            checked={settings.allow_auto_switch_to_free}
+                            onChange={e => updateField('allow_auto_switch_to_free', e.target.checked)}
+                        />
+                        <span className="toggle-slider"></span>
+                    </label>
+                </div>
+
+                {
+                    settings.background_refresh && (
+                        <>
+                            <div className="setting-item sub-item">
+                                <div className="setting-info">
+                                    <span className="setting-label">调度间隔（分钟）</span>
+                                </div>
+                                <input
+                                    type="number"
+                                    className="number-input"
+                                    min={5}
+                                    max={120}
+                                    value={settings.refresh_interval_minutes}
+                                    onChange={e => updateField('refresh_interval_minutes', parseInt(e.target.value) || 30)}
+                                />
                             </div>
-                            <input
-                                type="number"
-                                className="number-input"
-                                min={5}
-                                max={120}
-                                value={settings.refresh_interval_minutes}
-                                onChange={e => updateField('refresh_interval_minutes', parseInt(e.target.value) || 30)}
-                            />
-                        </div>
-                        <div className="setting-item sub-item">
-                            <div className="setting-info">
-                                <span className="setting-label">非活跃保活阈值（天）</span>
-                                <span className="setting-desc">当账号 last_refresh 超过该阈值时，调度器才会尝试保活刷新</span>
+                            <div className="setting-item sub-item">
+                                <div className="setting-info">
+                                    <span className="setting-label">非活跃保活阈值（天）</span>
+                                    <span className="setting-desc">当账号 last_refresh 超过该阈值时，调度器才会尝试保活刷新</span>
+                                </div>
+                                <input
+                                    type="number"
+                                    className="number-input"
+                                    min={1}
+                                    max={30}
+                                    value={settings.inactive_refresh_days}
+                                    onChange={e => updateField('inactive_refresh_days', parseInt(e.target.value) || 7)}
+                                />
                             </div>
-                            <input
-                                type="number"
-                                className="number-input"
-                                min={1}
-                                max={30}
-                                value={settings.inactive_refresh_days}
-                                onChange={e => updateField('inactive_refresh_days', parseInt(e.target.value) || 7)}
-                            />
-                        </div>
-                    </>
-                )}
-            </div>
+                        </>
+                    )
+                }
+            </div >
 
             <div className="settings-section">
                 <h3><Monitor size={16} /> IDE 重载</h3>
@@ -248,6 +267,6 @@ export function Settings() {
                     </button>
                 </div>
             </div>
-        </div>
+        </div >
     );
 }

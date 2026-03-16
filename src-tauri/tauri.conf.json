@@ -20,8 +20,8 @@
       }
     ],
     "trayIcon": {
-      "iconPath": "icons/32x32.png",
-      "iconAsTemplate": true
+      "iconPath": "icons/128x128.png",
+      "iconAsTemplate": false
     },
     "security": {
       "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://auth.openai.com https://chatgpt.com; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"

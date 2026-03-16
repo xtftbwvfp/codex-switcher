@@ -39,6 +39,10 @@ pub struct AppSettings {
     /// 界面配色方案
     #[serde(default = "default_theme_palette")]
     pub theme_palette: String,
+
+    /// 是否允许智能切号自动切换到免费账号
+    #[serde(default = "default_false")]
+    pub allow_auto_switch_to_free: bool,
 }
 
 fn default_theme_palette() -> String {
@@ -71,6 +75,7 @@ impl Default for AppSettings {
             refresh_interval_minutes: default_refresh_interval(),
             inactive_refresh_days: default_inactive_refresh_days(),
             theme_palette: default_theme_palette(),
+            allow_auto_switch_to_free: false,
         }
     }
 }
@@ -414,13 +419,24 @@ impl AccountStore {
         store.backfill_refresh_tokens();
         Ok(store)
     }
-
     /// 从 auth_json 中提取 refresh_token（兼容 tokens.refresh_token 或根级 refresh_token）
     pub fn extract_refresh_token(auth_json: &Value) -> Option<String> {
         auth_json
             .get("tokens")
             .and_then(|t| t.get("refresh_token"))
             .or_else(|| auth_json.get("refresh_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    }
+
+    /// 从 auth_json 中提取 access_token
+    pub fn extract_access_token(auth_json: &Value) -> Option<String> {
+        auth_json
+            .get("tokens")
+            .and_then(|t| t.get("access_token"))
+            .or_else(|| auth_json.get("access_token"))
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|s| !s.is_empty())

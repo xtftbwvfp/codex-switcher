@@ -41,9 +41,9 @@ export function UsageCard({ usage, loading, error, onRefresh }: UsageCardProps) 
 
     return (
         <div className="usage-meters">
-            {/* 5小时配额 */}
+            {/* 5小时配额 / 免费限额 */}
             <div className="usage-row">
-                <span className="usage-label">5h 配额</span>
+                <span className="usage-label">{isFree ? '限额' : '5h 配额'}</span>
                 <span className="usage-reset">{fiveHourTimeLeft || usage.five_hour_reset}</span>
                 <span className="usage-percent">{usage.five_hour_left}%</span>
             </div>

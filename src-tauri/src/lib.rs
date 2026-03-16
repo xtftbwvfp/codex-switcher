@@ -144,6 +144,9 @@ fn update_settings(
         previous
     };
 
+    // 联动刷新托盘菜单文案 (同步更新“下个账号”预览)
+    crate::tray::update_tray_menu(&app);
+
     let mut scheduler_handle = state.scheduler.lock().map_err(|e| e.to_string())?;
 
     match (previous, settings.background_refresh) {
@@ -168,6 +171,7 @@ fn update_settings(
 #[tauri::command]
 fn import_current_account(
     state: State<AppState>,
+    app: tauri::AppHandle,
     name: String,
     notes: Option<String>,
 ) -> Result<Account, String> {
@@ -179,6 +183,9 @@ fn import_current_account(
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     let account = store.add_account(name, auth_json, notes);
     store.save()?;
+
+    // 联动刷新托盘菜单
+    crate::tray::update_tray_menu(&app);
 
     Ok(account)
 }
@@ -209,10 +216,12 @@ fn check_sync_conflict(state: State<AppState>) -> Result<Option<String>, String>
 
 /// 删除账号
 #[tauri::command]
-fn delete_account(state: State<AppState>, id: String) -> Result<(), String> {
+fn delete_account(state: State<AppState>, app: tauri::AppHandle, id: String) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.delete_account(&id)?;
     store.save()?;
+    // 联动刷新托盘菜单
+    crate::tray::update_tray_menu(&app);
     Ok(())
 }
 
@@ -220,6 +229,7 @@ fn delete_account(state: State<AppState>, id: String) -> Result<(), String> {
 #[tauri::command]
 fn update_account(
     state: State<AppState>,
+    app: tauri::AppHandle,
     id: String,
     name: Option<String>,
     notes: Option<String>,
@@ -227,6 +237,8 @@ fn update_account(
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.update_account(&id, name, notes)?;
     store.save()?;
+    // 联动刷新托盘菜单
+    crate::tray::update_tray_menu(&app);
     Ok(())
 }
 
@@ -252,7 +264,7 @@ fn export_accounts(state: State<AppState>) -> Result<String, String> {
 
 /// 导入账号配置
 #[tauri::command]
-fn import_accounts(state: State<AppState>, json: String) -> Result<(), String> {
+fn import_accounts(state: State<AppState>, app: tauri::AppHandle, json: String) -> Result<(), String> {
     let new_store = AccountStore::import(&json)?;
     let missing = new_store.accounts_missing_refresh_token();
     if !missing.is_empty() {
@@ -264,6 +276,8 @@ fn import_accounts(state: State<AppState>, json: String) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     *store = new_store;
     store.save()?;
+    // 联动刷新托盘菜单
+    crate::tray::update_tray_menu(&app);
     Ok(())
 }
 
@@ -271,6 +285,7 @@ fn import_accounts(state: State<AppState>, json: String) -> Result<(), String> {
 #[tauri::command]
 async fn finalize_oauth_login(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     code: String,
 ) -> Result<Account, String> {
     let token_res = oauth_server::complete_oauth_login(code).await?;
@@ -314,12 +329,22 @@ async fn finalize_oauth_login(
     }
 
     store.save()?;
+    // 联动刷新托盘菜单
+    crate::tray::update_tray_menu(&app);
     Ok(account)
 }
 
+// 补充 AppState 的辅助方法以方便在 finalize_oauth_login 中获取 AppHandle 是不行的，
+// 因为 finalize_oauth_login 是 async 且 Command 宏会处理。
+// 我们直接给 finalize_oauth_login 增加 AppHandle 参数。
+
 /// 切换到指定账号（异步版本，不做本地 Token 续期）
 #[tauri::command]
-async fn switch_account(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+async fn switch_account(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
     // 0. 切换前仅同步“当前激活账号”与官方 auth.json，避免全表匹配导致串号
     if let Ok(current_auth) = AccountStore::read_codex_auth() {
         if let Ok(mut store) = state.store.lock() {
@@ -467,9 +492,211 @@ async fn switch_account(state: tauri::State<'_, AppState>, id: String) -> Result
     };
     state.refresh_locks.release(&target_id).await;
     switch_result?;
-
     println!("[Switch] 切换完成！");
+    // 联动刷新托盘菜单
+    crate::tray::update_tray_menu(&app);
     Ok(())
+}
+
+/// 预测下一个拟切换的账号信息 (仅基于缓存，不发起网络请求)
+pub fn predict_next_account_internal(state: tauri::State<'_, AppState>) -> Option<(String, i32)> {
+    let (accounts, current_id, allow_free) = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        (
+            store
+                .list_accounts()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            store.current.clone(),
+            store.settings.allow_auto_switch_to_free,
+        )
+    };
+
+    if accounts.is_empty() {
+        return None;
+    }
+
+    let current_idx = current_id
+        .as_ref()
+        .and_then(|id| accounts.iter().position(|a| &a.id == id))
+        .unwrap_or(accounts.len() - 1);
+
+    // 尝试寻找下一个有额度的账号 (必须跳过当前账号)
+    let search_limit = accounts.len().saturating_sub(1);
+    for i in 1..=search_limit {
+        let idx = (current_idx + i) % accounts.len();
+        let target = &accounts[idx];
+
+        if let Some(q) = &target.cached_quota {
+            let plan = q.plan_type.to_lowercase();
+            let is_free = plan == "free" || plan == "unknown";
+
+            if is_free && !allow_free {
+                continue;
+            }
+
+            let has_quota = if is_free {
+                q.five_hour_left > 0.0
+            } else {
+                q.five_hour_left > 0.0 && q.weekly_left > 0.0
+            };
+
+            if has_quota {
+                return Some((target.name.clone(), q.five_hour_left as i32));
+            }
+        }
+    }
+    None
+}
+
+/// 内部使用的切换到下一个账号逻辑 (智能切号)
+pub async fn switch_to_next_account_internal(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let (accounts, current_id, allow_free) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        (
+            store
+                .list_accounts()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            store.current.clone(),
+            store.settings.allow_auto_switch_to_free,
+        )
+    };
+
+    if accounts.is_empty() {
+        return Err("没有可用账号".to_string());
+    }
+
+    let current_idx = current_id
+        .as_ref()
+        .and_then(|id| accounts.iter().position(|a| &a.id == id))
+        .unwrap_or(accounts.len() - 1); // 如果当前没激活，从头开始搜索 (+1 后为 0)
+
+    // 尝试寻找下一个有额度的账号
+    // 尝试寻找下一个有额度的账号 (必须跳过当前账号)
+    let search_limit = accounts.len().saturating_sub(1);
+    for i in 1..=search_limit {
+        let idx = (current_idx + i) % accounts.len();
+        let target = &accounts[idx];
+
+        // 1. 获取最新额度信息 (不切换，仅刷新数据)
+        // 注意：此处调用 get_quota_by_id 的内部逻辑部分
+        let quota = match get_quota_internal(&state, target.id.clone()).await {
+            Ok(u) => Some(u),
+            Err(e) => {
+                println!("[SmartSwitch] 账号 {} 刷新额度失败: {}", target.name, e);
+                None
+            }
+        };
+
+        if let Some(q) = quota {
+            let plan = q.plan_type.to_lowercase();
+            let is_free = plan == "free" || plan == "unknown";
+
+            // 2. 检查切 FREE 开关
+            if is_free && !allow_free {
+                println!("[SmartSwitch] 跳过免费账号: {}", target.name);
+                continue;
+            }
+
+            // 3. 检查配额
+            let has_quota = if is_free {
+                // 免费账号只看 five_hour_left (其实是当前限额)
+                q.five_hour_left > 0
+            } else {
+                // 付费账号必须 5h 和 周 都有额度
+                q.five_hour_left > 0 && q.weekly_left > 0
+            };
+
+            if has_quota {
+                println!(
+                    "[SmartSwitch] 发现可用账号: {} ({})",
+                    target.name, q.plan_type
+                );
+                return switch_account(state, app.clone(), target.id.clone()).await;
+            } else {
+                println!("[SmartSwitch] 账号 {} 额度已耗尽，跳过", target.name);
+            }
+        } else {
+            // 如果刷新失败，保底行为：跳过该账号，继续找下一个
+            println!(
+                "[SmartSwitch] 无法确认账号 {} 额度状态，跳过以策安全",
+                target.name
+            );
+        }
+    }
+
+    Err("遍历完所有账号，未发现可用配额的账号".to_string())
+}
+
+/// 内部辅助：获取额度数据
+async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay, String> {
+    let (access_token, account_id, refresh_token) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let account = store.accounts.get(&id).ok_or("账号不存在")?;
+        let at =
+            AccountStore::extract_access_token(&account.auth_json).ok_or("失效的 access_token")?;
+        let aid = AccountStore::extract_account_id(&account.auth_json);
+        (at, aid, account.refresh_token.clone())
+    };
+
+    let (display, new_tokens) = UsageFetcher::fetch_usage_direct(
+        access_token,
+        account_id,
+        refresh_token,
+        true, // 允许自动刷新 token
+    )
+    .await?;
+
+    // 如果产生了新 Token，保存
+    if let Some(res) = new_tokens {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        if let Some(account) = store.accounts.get_mut(&id) {
+            AccountStore::apply_refreshed_tokens(
+                account,
+                res.access_token,
+                res.refresh_token,
+                res.id_token,
+                res.expires_in,
+            );
+            let _ = store.save();
+        }
+    }
+
+    // 更新缓存
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        if let Some(account) = store.accounts.get_mut(&id) {
+            account.cached_quota = Some(usage_to_cached(&display));
+            let _ = store.save();
+        }
+    }
+
+    Ok(display)
+}
+
+fn usage_to_cached(u: &UsageDisplay) -> crate::account::CachedQuota {
+    crate::account::CachedQuota {
+        five_hour_left: u.five_hour_left as f64,
+        five_hour_reset: u.five_hour_reset.clone(),
+        five_hour_reset_at: u.five_hour_reset_at,
+        five_hour_label: u.five_hour_label.clone(),
+        weekly_left: u.weekly_left as f64,
+        weekly_reset: u.weekly_reset.clone(),
+        weekly_reset_at: u.weekly_reset_at,
+        weekly_label: u.weekly_label.clone(),
+        plan_type: u.plan_type.clone(),
+        is_valid_for_cli: u.is_valid_for_cli,
+        updated_at: Utc::now(),
+    }
 }
 
 /// 将当前 Codex auth.json 强制同步到指定账号
@@ -494,6 +721,7 @@ fn check_codex_login() -> Result<bool, String> {
 #[tauri::command]
 async fn get_quota_by_id(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     id: String,
 ) -> Result<UsageDisplay, String> {
     // 当前激活账号：先按 ~/.codex/auth.json 做身份校验与同步，再继续走 API 查询配额
