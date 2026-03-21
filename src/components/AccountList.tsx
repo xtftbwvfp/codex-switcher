@@ -50,6 +50,7 @@ export function AccountList({
     const [searchQuery, setSearchQuery] = useState('');
     const [filter, setFilter] = useState<FilterType>('all');
     const [invalidIds, setInvalidIds] = useState<Set<string>>(new Set());
+    const [bannedIds, setBannedIds] = useState<Set<string>>(new Set());
 
     const autoReload = settings.auto_reload_ide;
     const setAutoReload = (val: boolean) => onUpdateSettings({ ...settings, auto_reload_ide: val });
@@ -65,8 +66,13 @@ export function AccountList({
     useEffect(() => {
         const initialUsage: Record<string, UsageData> = {};
         const initialInvalids = new Set<string>();
+        const initialBanned = new Set<string>();
 
         accounts.forEach(acc => {
+            if (acc.is_banned) {
+                initialBanned.add(acc.id);
+                initialInvalids.add(acc.id);
+            }
             if (acc.cached_quota) {
                 const isValid = acc.cached_quota.is_valid_for_cli !== false;
                 initialUsage[acc.id] = {
@@ -86,6 +92,7 @@ export function AccountList({
         });
         setUsageMap(prev => ({ ...prev, ...initialUsage }));
         setInvalidIds(initialInvalids);
+        setBannedIds(initialBanned);
     }, [accounts]);
 
     // 搜索与过滤逻辑
@@ -159,7 +166,13 @@ export function AccountList({
             });
             onRefreshComplete?.();
         } catch (err) {
-            if (String(err).includes('TOKEN_INVALID')) setInvalidIds(prev => new Set(prev).add(id));
+            const errMsg = String(err);
+            if (errMsg.includes('ACCOUNT_BANNED')) {
+                setBannedIds(prev => new Set(prev).add(id));
+                setInvalidIds(prev => new Set(prev).add(id));
+            } else if (errMsg.includes('TOKEN_INVALID')) {
+                setInvalidIds(prev => new Set(prev).add(id));
+            }
         } finally {
             setRefreshingIds(prev => { const n = new Set(prev); n.delete(id); return n; });
         }
@@ -249,11 +262,12 @@ export function AccountList({
                         const usage = usageMap[acc.id];
                         const status = getStatusInfo(acc);
                         const isInvalid = invalidIds.has(acc.id);
+                        const isBanned = bannedIds.has(acc.id);
                         const isCurrent = acc.id === currentId;
                         const isRefreshing = refreshingIds.has(acc.id);
 
                         return (
-                            <div key={acc.id} className={`account-row ${isCurrent ? 'current' : ''} ${selectedIds.has(acc.id) ? 'selected' : ''} ${isInvalid ? 'invalid' : ''}`}>
+                            <div key={acc.id} className={`account-row ${isCurrent ? 'current' : ''} ${selectedIds.has(acc.id) ? 'selected' : ''} ${isBanned ? 'banned' : isInvalid ? 'invalid' : ''}`}>
                                 <div className="col-checkbox">
                                     <input type="checkbox" className="custom-checkbox" checked={selectedIds.has(acc.id)} onChange={() => { const s = new Set(selectedIds); s.has(acc.id) ? s.delete(acc.id) : s.add(acc.id); setSelectedIds(s); }} />
                                 </div>
@@ -263,7 +277,7 @@ export function AccountList({
                                     <div className="badges" style={{ display: 'flex', gap: '4px', marginLeft: '8px' }}>
                                         {copiedId === acc.id && <span className="badge copy-success">已复制</span>}
                                         {isCurrent && <span className="badge current">当前</span>}
-                                        {isInvalid && <span className="badge invalid">失效</span>}
+                                        {isBanned ? <span className="badge banned" title="该账号已被 OpenAI 封禁">封号</span> : isInvalid && <span className="badge invalid">失效</span>}
                                         {usage?.plan_type && <span className="badge plan">{usage.plan_type.toUpperCase()}</span>}
                                     </div>
                                 </div>

@@ -104,6 +104,10 @@ pub struct Account {
     /// 非活跃账号保活状态
     #[serde(default)]
     pub keepalive: KeepaliveState,
+
+    /// 该账号是否已被 OpenAI 封禁
+    #[serde(default)]
+    pub is_banned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +321,7 @@ impl AccountStore {
             notes,
             cached_quota: None,
             keepalive: KeepaliveState::default(),
+            is_banned: false,
         };
 
         self.accounts.insert(id.clone(), account.clone());
@@ -758,15 +763,22 @@ impl AccountStore {
         account.auth_json = auth_json;
     }
 
-    /// 从 auth_json 中提取 OpenAI User ID (从 access_token JWT)
     pub fn extract_openai_user_id(auth_json: &Value) -> Option<String> {
         let claims = Self::extract_jwt_claims_from_auth(auth_json, "access_token")?;
 
-        // 尝试获取 user_id
+        // 1. 尝试特定的 profile 嵌套路径 (从 cat 输出看有这种结构)
+        if let Some(profile) = claims.get("https://api.openai.com/profile") {
+            if let Some(uid) = profile.get("user_id").and_then(|v| v.as_str()) {
+                return Some(uid.to_string());
+            }
+        }
+
+        // 2. 尝试常见 claim
         claims
             .get("https://api.openai.com/auth/user_id")
             .and_then(|v| v.as_str())
-            .or_else(|| claims.get("sub").and_then(|v| v.as_str())) // sub 通常也是 ID
+            .or_else(|| claims.get("user_id").and_then(|v| v.as_str()))
+            .or_else(|| claims.get("sub").and_then(|v| v.as_str()))
             .map(|s| s.to_string())
     }
 }

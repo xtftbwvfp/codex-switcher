@@ -32,6 +32,13 @@ export interface KeepaliveState {
     last_error: string | null;
 }
 
+export interface SyncStatus {
+    is_synced: boolean;
+    disk_email: string | null;
+    matching_id: string | null;
+    current_id: string | null;
+}
+
 export interface Account {
     id: string;
     name: string;
@@ -41,6 +48,7 @@ export interface Account {
     notes: string | null;
     cached_quota: CachedQuota | null;
     keepalive: KeepaliveState;
+    is_banned: boolean;
 }
 
 export function useAccounts() {
@@ -246,5 +254,12 @@ export function useAccounts() {
         checkSyncConflict: useCallback(async () => {
             return invoke<string | null>('check_sync_conflict');
         }, []),
+        getSyncStatus: useCallback(async () => {
+            return invoke<SyncStatus>('get_sync_status');
+        }, []),
+        syncActiveWithDisk: useCallback(async () => {
+            await invoke('sync_active_with_disk');
+            await loadData();
+        }, [loadData]),
     };
 }

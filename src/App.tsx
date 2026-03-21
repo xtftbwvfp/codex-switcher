@@ -31,6 +31,8 @@ function App() {
     reloadIdeWindows,
     updateSettings,
     checkSyncConflict,
+    getSyncStatus,
+    syncActiveWithDisk,
   } = useAccounts();
 
   const {
@@ -48,6 +50,21 @@ function App() {
   const [showConflictModal, setShowConflictModal] = useState(false);
   const [conflictAccountName, setConflictAccountName] = useState('');
   const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null);
+  const [isSwitching, setIsSwitching] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<any>(null);
+
+  const checkSyncStatus = async () => {
+    try {
+      const status = await getSyncStatus();
+      setSyncStatus(status);
+    } catch (err) {
+      console.error('检查同步状态失败:', err);
+    }
+  };
+
+  useEffect(() => {
+    checkSyncStatus();
+  }, []);
 
   const currentAccount = accounts.find(a => a.id === currentId) || null;
 
@@ -120,7 +137,9 @@ function App() {
 
   // 切换账号（带冲突检测）
   const handleSwitch = async (id: string) => {
+    if (isSwitching) return;
     try {
+      setIsSwitching(true);
       // 1. 检查是否有未同步的官方 Token 更新
       const conflictName = await checkSyncConflict();
 
@@ -136,17 +155,49 @@ function App() {
       await performSwitch(id);
     } catch (err) {
       console.error('切换检查失败:', err);
-      // 如果检查失败，保守起见还是直接尝试切换，或者报错（这里选择继续切换）
-      await performSwitch(id);
+      // 尝试保守切换
+      try {
+        await performSwitch(id);
+      } catch (switchErr) {
+        // switchTo 内部已经 setError 了，但我们这里可以再打印一下
+        console.error('保守切换也失败了:', switchErr);
+      }
+    } finally {
+      setIsSwitching(false);
+      checkSyncStatus();
     }
   };
 
   // 确认覆盖
   const handleConfirmSwitch = async () => {
-    setShowConflictModal(false);
-    if (pendingSwitchId) {
+    if (!pendingSwitchId || isSwitching) return;
+    try {
+      setIsSwitching(true);
       await performSwitch(pendingSwitchId);
+      setShowConflictModal(false);
       setPendingSwitchId(null);
+    } catch (err) {
+      console.error('确认切换失败:', err);
+      // switchTo 内部已经 setError，这里关闭弹窗即可，让用户看到 Banner 错误
+      setShowConflictModal(false);
+    } finally {
+      setIsSwitching(false);
+      checkSyncStatus();
+    }
+  };
+
+  // 以 IDE 状态为准
+  const handleFollowIdeAction = async () => {
+    try {
+      setIsSwitching(true);
+      await syncActiveWithDisk();
+      setShowConflictModal(false);
+      setPendingSwitchId(null);
+      await checkSyncStatus();
+    } catch (err) {
+      console.error('同步 IDE 状态失败:', err);
+    } finally {
+      setIsSwitching(false);
     }
   };
 
@@ -279,6 +330,23 @@ function App() {
             onRefreshUsage={refreshUsage}
             onNavigateToAccounts={() => setCurrentPage('accounts')}
             onExport={handleExport}
+            syncStatus={syncStatus}
+            onSyncWithDisk={async () => {
+              try {
+                await syncActiveWithDisk();
+                checkSyncStatus();
+              } catch (err) {
+                console.error('同步状态失败:', err);
+              }
+            }}
+            onImportDiskAccount={async (name) => {
+              try {
+                await importCurrent(name, '从 IDE 自动导入');
+                checkSyncStatus();
+              } catch (err) {
+                console.error('导入失败:', err);
+              }
+            }}
           />
         ) : currentPage === 'accounts' ? (
           <AccountList
@@ -320,6 +388,9 @@ function App() {
         cancelText="取消"
         onConfirm={handleConfirmSwitch}
         onCancel={handleCancelSwitch}
+        isLoading={isSwitching}
+        extraActionText="以 IDE 为准 (同步状态)"
+        onExtraAction={handleFollowIdeAction}
       />
     </div>
   );

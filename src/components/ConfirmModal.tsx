@@ -8,6 +8,9 @@ interface ConfirmModalProps {
     cancelText?: string;
     onConfirm: () => void;
     onCancel: () => void;
+    isLoading?: boolean;
+    extraActionText?: string;
+    onExtraAction?: () => void;
 }
 
 export function ConfirmModal({
@@ -17,7 +20,10 @@ export function ConfirmModal({
     confirmText = '确认',
     cancelText = '取消',
     onConfirm,
-    onCancel
+    onCancel,
+    isLoading = false,
+    extraActionText,
+    onExtraAction,
 }: ConfirmModalProps) {
     if (!isOpen) return null;
 
@@ -34,11 +40,16 @@ export function ConfirmModal({
                 </div>
 
                 <div className="confirm-footer">
-                    <button className="btn-cancel" onClick={onCancel}>
+                    <button className="btn-cancel" onClick={onCancel} disabled={isLoading}>
                         {cancelText}
                     </button>
-                    <button className="btn-confirm" onClick={onConfirm}>
-                        {confirmText}
+                    {extraActionText && onExtraAction && (
+                        <button className="btn-extra" onClick={onExtraAction} disabled={isLoading}>
+                            {extraActionText}
+                        </button>
+                    )}
+                    <button className="btn-confirm" onClick={onConfirm} disabled={isLoading}>
+                        {isLoading ? '正在切换...' : confirmText}
                     </button>
                 </div>
             </div>

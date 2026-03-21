@@ -45,7 +45,13 @@ fn detect_sync_conflict_for_current(
 
     // 如果官方 Token 存在且与本地不同（通常是更新了），则视为冲突
     if official_rt.is_some() && official_rt != local_rt {
-        return Some(account.name.clone());
+        let disk_email =
+            AccountStore::extract_email(disk_auth).unwrap_or_else(|| "未知账号".to_string());
+        if disk_email == account.name {
+            return Some(account.name.clone());
+        } else {
+            return Some(format!("{} ({})", account.name, disk_email));
+        }
     }
 
     None
@@ -264,7 +270,11 @@ fn export_accounts(state: State<AppState>) -> Result<String, String> {
 
 /// 导入账号配置
 #[tauri::command]
-fn import_accounts(state: State<AppState>, app: tauri::AppHandle, json: String) -> Result<(), String> {
+fn import_accounts(
+    state: State<AppState>,
+    app: tauri::AppHandle,
+    json: String,
+) -> Result<(), String> {
     let new_store = AccountStore::import(&json)?;
     let missing = new_store.accounts_missing_refresh_token();
     if !missing.is_empty() {
@@ -648,13 +658,27 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
         (at, aid, account.refresh_token.clone())
     };
 
-    let (display, new_tokens) = UsageFetcher::fetch_usage_direct(
+    let result = UsageFetcher::fetch_usage_direct(
         access_token,
         account_id,
         refresh_token,
         true, // 允许自动刷新 token
     )
-    .await?;
+    .await;
+
+    // 检测封号：如果 fetch 返回 ACCOUNT_BANNED，持久化标记
+    if let Err(ref e) = result {
+        if e.contains("ACCOUNT_BANNED") {
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            if let Some(account) = store.accounts.get_mut(&id) {
+                account.is_banned = true;
+                let _ = store.save();
+            }
+            return Err(e.clone());
+        }
+    }
+
+    let (display, new_tokens) = result?;
 
     // 如果产生了新 Token，保存
     if let Some(res) = new_tokens {
@@ -794,13 +818,27 @@ async fn get_quota_by_id(
 
     // 2. 直接使用该账号的 Token 获取用量
     let allow_local_refresh = allow_local_refresh_for_quota(is_current);
-    let (usage, new_tokens) = UsageFetcher::fetch_usage_direct(
+    let result = UsageFetcher::fetch_usage_direct(
         access_token,
         account_id,
         refresh_token,
         allow_local_refresh,
     )
-    .await?;
+    .await;
+
+    // 检测封号：如果 fetch 返回 ACCOUNT_BANNED，持久化标记
+    if let Err(ref e) = result {
+        if e.contains("ACCOUNT_BANNED") {
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            if let Some(account) = store.accounts.get_mut(&id) {
+                account.is_banned = true;
+                let _ = store.save();
+            }
+            return Err(e.clone());
+        }
+    }
+
+    let (usage, new_tokens) = result?;
 
     // 3. 如果有新 Token，更新该账号的数据
     if let Some(tokens) = new_tokens {
@@ -919,6 +957,113 @@ async fn reload_ide_windows(use_window_reload: bool) -> Result<Vec<String>, Stri
     Ok(reloaded)
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncStatus {
+    pub is_synced: bool,
+    pub disk_email: Option<String>,
+    pub matching_id: Option<String>,
+    pub current_id: Option<String>,
+}
+
+/// 检查 IDE 磁盘状态与内存状态的同步情况
+#[tauri::command]
+fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
+    let disk_auth = match AccountStore::read_codex_auth() {
+        Ok(a) => a,
+        Err(_) => {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            return Ok(SyncStatus {
+                is_synced: true,
+                disk_email: None,
+                matching_id: None,
+                current_id: store.current.clone(),
+            });
+        }
+    };
+
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let disk_email = AccountStore::extract_email(&disk_auth);
+
+    // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
+    let matching_id = disk_email
+        .as_deref()
+        .and_then(|email| {
+            let email_lower = email.to_lowercase();
+            store
+                .accounts
+                .values()
+                .find(|a| {
+                    AccountStore::extract_email(&a.auth_json)
+                        .map(|e| e.to_lowercase() == email_lower)
+                        .unwrap_or(false)
+                        || a.name.to_lowercase() == email_lower
+                })
+                .map(|a| a.id.clone())
+        })
+        .or_else(|| {
+            store
+                .accounts
+                .values()
+                .find(|a| AccountStore::auth_identity_matches(&a.auth_json, &disk_auth))
+                .map(|a| a.id.clone())
+        });
+
+    let is_synced = match (&store.current, &matching_id) {
+        (Some(curr), Some(match_id)) => curr == match_id,
+        (None, None) => true,
+        _ => false,
+    };
+
+    Ok(SyncStatus {
+        is_synced,
+        disk_email,
+        matching_id,
+        current_id: store.current.clone(),
+    })
+}
+
+/// 强制将 Switcher 的激活指针对齐到磁盘账号
+/// 安全策略：只修改激活指针，绝不覆盖已有账号的 Token 数据
+#[tauri::command]
+fn sync_active_with_disk(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    let disk_auth = AccountStore::read_codex_auth()?;
+    let disk_email = AccountStore::extract_email(&disk_auth);
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+
+    // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
+    let matching_id = disk_email
+        .as_deref()
+        .and_then(|email| {
+            let email_lower = email.to_lowercase();
+            store
+                .accounts
+                .values()
+                .find(|a| {
+                    AccountStore::extract_email(&a.auth_json)
+                        .map(|e| e.to_lowercase() == email_lower)
+                        .unwrap_or(false)
+                        || a.name.to_lowercase() == email_lower
+                })
+                .map(|a| a.id.clone())
+        })
+        .or_else(|| {
+            // fallback: account_id 匹配
+            store
+                .accounts
+                .values()
+                .find(|a| AccountStore::auth_identity_matches(&a.auth_json, &disk_auth))
+                .map(|a| a.id.clone())
+        })
+        .ok_or_else(|| "磁盘账号不在管理列表中，请先导入".to_string())?;
+
+    // 安全：只改指针，不覆盖 Token。避免封号 Token 污染好号。
+    store.current = Some(matching_id);
+    store.save()?;
+
+    crate::tray::update_tray_menu(&app);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -984,6 +1129,8 @@ pub fn run() {
             check_sync_conflict,
             request_quarantine_fix_ticket,
             fix_codex_quarantine,
+            get_sync_status,
+            sync_active_with_disk,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1015,6 +1162,7 @@ mod tests {
             notes: None,
             cached_quota: None,
             keepalive: account::KeepaliveState::default(),
+            is_banned: false,
         }
     }
 

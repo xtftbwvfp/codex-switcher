@@ -260,6 +260,12 @@
     cursor: help;
 }
 
+.badge.banned {
+    background: rgba(249, 115, 22, 0.2);
+    color: #f97316;
+    cursor: help;
+}
+
 .badge.copy-success {
     background: rgba(88, 166, 255, 0.2);
     color: var(--primary-color);
@@ -291,6 +297,11 @@
 .account-row.invalid {
     background: rgba(239, 68, 68, 0.08);
     border-left: 3px solid #ef4444;
+}
+
+.account-row.banned {
+    background: rgba(249, 115, 22, 0.08);
+    border-left: 3px solid #f97316;
 }
 
 .col-quota-merged {

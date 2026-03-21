@@ -15,6 +15,13 @@ interface DashboardProps {
     onRefreshUsage: () => void;
     onNavigateToAccounts: () => void;
     onExport: () => void;
+    syncStatus?: {
+        is_synced: boolean;
+        disk_email: string | null;
+        matching_id: string | null;
+    };
+    onSyncWithDisk: () => void;
+    onImportDiskAccount: (name: string) => void;
 }
 
 export function Dashboard({
@@ -28,6 +35,9 @@ export function Dashboard({
     onRefreshUsage,
     onNavigateToAccounts,
     onExport,
+    syncStatus,
+    onSyncWithDisk,
+    onImportDiskAccount,
 }: DashboardProps) {
     // 获取最佳账号推荐（配额最高的账号）
     const getBestAccount = () => {
@@ -49,6 +59,30 @@ export function Dashboard({
 
             {/* 统计卡片 */}
             <StatsBar accountCount={accounts.length} usage={usage} />
+
+            {/* 同步状态警告 */}
+            {syncStatus && !syncStatus.is_synced && (
+                <div className="sync-warning-banner">
+                    <div className="banner-content">
+                        <span className="banner-icon">⚠️</span>
+                        <div className="banner-text">
+                            <strong>登录状态不一致：</strong>
+                            检测到 IDE 正在使用 <span>{syncStatus.disk_email || '未知账号'}</span>
+                        </div>
+                    </div>
+                    <div className="banner-actions">
+                        {syncStatus.matching_id ? (
+                            <button className="btn btn-sm btn-accent" onClick={onSyncWithDisk}>
+                                修正激活状态
+                            </button>
+                        ) : (
+                            <button className="btn btn-sm btn-primary" onClick={() => onImportDiskAccount(syncStatus.disk_email || '新账号')}>
+                                立即导入该账号
+                            </button>
+                        )}
+                    </div>
+                </div>
+            )}
 
             {/* 双栏布局 */}
             <div className="dashboard-grid">

@@ -29,6 +29,8 @@ fn is_reused_or_revoked_error(reason: &str) -> bool {
     lower.contains("refresh_token_reused")
         || lower.contains("refresh_token_invalidated")
         || lower.contains("refresh_token_expired")
+        || lower.contains("deactivated")
+        || lower.contains("unauthorized")
 }
 
 /// 启动后台状态同步调度器

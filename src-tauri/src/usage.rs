@@ -53,11 +53,16 @@ impl UsageFetcher {
         let mut new_tokens: Option<crate::oauth::TokenResponse> = None;
 
         let client = reqwest::Client::new();
+        let user_agent = format!(
+            "codex_cli_rs/{} (Mac OS; x86_64) codex-cli",
+            env!("CARGO_PKG_VERSION")
+        );
         let build_request = |at: &str, aid: &Option<String>| {
             let mut req = client
                 .get("https://chatgpt.com/backend-api/wham/usage")
                 .header("Authorization", format!("Bearer {}", at))
-                .header("User-Agent", "CodexSwitcher/1.0")
+                .header("User-Agent", &user_agent)
+                .header("originator", "codex_cli_rs")
                 .header("Accept", "application/json")
                 .timeout(std::time::Duration::from_secs(30));
             if let Some(id) = aid {
@@ -91,6 +96,17 @@ impl UsageFetcher {
         }
 
         if status == 401 || status == 403 {
+            // 读取响应体以检测是否为封号
+            let body = response.text().await.unwrap_or_default().to_lowercase();
+            let is_banned = body.contains("deactivated")
+                || body.contains("banned")
+                || body.contains("suspended")
+                || body.contains("account_deactivated");
+
+            if is_banned {
+                return Err("ACCOUNT_BANNED:该账号已被封禁".to_string());
+            }
+
             if !allow_local_refresh {
                 return Err(
                     "当前激活账号访问配额接口返回 401/403；已禁用本地 refresh_token 刷新，请稍后重试或在 Codex 中触发一次请求".to_string(),

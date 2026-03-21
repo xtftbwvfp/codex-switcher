@@ -187,3 +187,59 @@
 .link-icon {
     color: var(--primary-color);
 }
+
+/* 同步状态警告 */
+.sync-warning-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    animation: slideDown 0.3s ease-out;
+}
+
+.banner-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.banner-icon {
+    font-size: 18px;
+}
+
+.banner-text {
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.banner-text strong {
+    color: #f59e0b;
+}
+
+.banner-text span {
+    font-family: monospace;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.banner-actions {
+    display: flex;
+    gap: 8px;
+}
+
+@keyframes slideDown {
+    from {
+        transform: translateY(-10px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
