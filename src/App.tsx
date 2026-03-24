@@ -43,7 +43,15 @@ function App() {
     refresh: refreshUsage,
   } = useUsage();
 
-  const [currentPage, setCurrentPage] = useState<PageType>('dashboard');
+  const [currentPage, setCurrentPage] = useState<PageType>(() => {
+    const saved = localStorage.getItem('currentPage');
+    return (saved as PageType) || 'dashboard';
+  });
+
+  // 持久化当前 tab
+  useEffect(() => {
+    localStorage.setItem('currentPage', currentPage);
+  }, [currentPage]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [schedulerError, setSchedulerError] = useState<string | null>(null);
 
