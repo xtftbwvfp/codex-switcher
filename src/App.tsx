@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react';
 import { RefreshCw, Zap } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { save, open } from '@tauri-apps/plugin-dialog';
-import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
+import { save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 import { useAccounts } from './hooks/useAccounts';
 import { useUsage } from './hooks/useUsage';
 import { AddAccountModal } from './components/AddAccountModal';
@@ -30,7 +30,6 @@ function App() {
     deleteAccount,
     setInactiveRefreshEnabled,
     exportAccounts,
-    importAccounts,
     reloadIdeWindows,
     updateSettings,
     checkSyncConflict,
@@ -248,25 +247,6 @@ function App() {
     }
   };
 
-  const handleImport = async () => {
-    try {
-      const selected = await open({
-        multiple: false,
-        filters: [{
-          name: 'JSON',
-          extensions: ['json']
-        }]
-      });
-
-      if (selected && !Array.isArray(selected)) {
-        const text = await readTextFile(selected);
-        await importAccounts(text);
-        alert('导入成功！');
-      }
-    } catch (err) {
-      alert('导入失败: ' + String(err));
-    }
-  };
 
   if (loading) {
     return (
@@ -329,12 +309,6 @@ function App() {
         </nav>
 
         <div className="header-actions">
-          <button className="btn btn-ghost" onClick={handleImport}>
-            <span className="btn-icon">↑</span> 导入
-          </button>
-          <button className="btn btn-ghost" onClick={handleExport}>
-            <span className="btn-icon">↓</span> 导出
-          </button>
           <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
             + 添加账号
           </button>
