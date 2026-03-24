@@ -1122,47 +1122,12 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
         }
     }
 
-    // Codex CLI config.toml：写入 openai_base_url（推荐方式，不再有 deprecated 警告）
-    let config_path = home.join(".codex").join("config.toml");
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            let config_marker = "# codex-switcher-proxy";
-            let cleaned: Vec<&str> = content
-                .lines()
-                .filter(|line| !line.contains(config_marker))
-                .collect();
-            let mut new_content = cleaned.join("\n");
-
-            if enable {
-                // 检查是否已有 [model_providers.openai] 段
-                if !new_content.contains("[model_providers.openai]") {
-                    if !new_content.ends_with('\n') {
-                        new_content.push('\n');
-                    }
-                    new_content.push_str(&format!(
-                        "\n[model_providers.openai] {}\nname = \"OpenAI\" {}\nbase_url = \"{}\" {}\n",
-                        config_marker, config_marker, env_value, config_marker
-                    ));
-                } else {
-                    // 在 [model_providers.openai] 段后插入 name + base_url
-                    new_content = new_content.replace(
-                        "[model_providers.openai]",
-                        &format!(
-                            "[model_providers.openai]\nname = \"OpenAI\" {}\nbase_url = \"{}\" {}",
-                            config_marker, env_value, config_marker
-                        ),
-                    );
-                }
-            }
-
-            let _ = std::fs::write(&config_path, &new_content);
-            results.push("config.toml".to_string());
-        }
-    }
+    // 注意：config.toml 不能覆盖内置的 openai provider（保留名），
+    // 只能通过 OPENAI_BASE_URL 环境变量设置代理地址。
 
     let status = if enable { "已设置" } else { "已移除" };
     Ok(format!(
-        "{} 代理地址 ({})。\n重启 Codex CLI / Codex App 后生效。",
+        "{} OPENAI_BASE_URL ({})。\n终端：新窗口生效\nCodex App：重启后生效",
         status,
         results.join(", ")
     ))
