@@ -1133,6 +1133,78 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
     ))
 }
 
+/// 切换 Codex fast 模式（修改 config.toml 的 profile 字段）
+#[tauri::command]
+fn set_codex_fast_mode(enable: bool) -> Result<String, String> {
+    let config_path = dirs::home_dir()
+        .ok_or("无法获取用户目录")?
+        .join(".codex")
+        .join("config.toml");
+
+    if !config_path.exists() {
+        return Err("~/.codex/config.toml 不存在".to_string());
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("读取 config.toml 失败: {}", e))?;
+
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut found_profile = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // 匹配 profile = "xxx" 行（顶层，不在 [section] 下面的缩进行）
+        if trimmed.starts_with("profile") && trimmed.contains('=') && !trimmed.starts_with('[') {
+            found_profile = true;
+            if enable {
+                new_lines.push("profile = \"fast\"".to_string());
+            }
+            // 不 enable 时跳过这行（移除 profile）
+            continue;
+        }
+        new_lines.push(line.to_string());
+    }
+
+    // 如果 enable 但没找到 profile 行，在文件开头插入
+    if enable && !found_profile {
+        new_lines.insert(0, "profile = \"fast\"".to_string());
+    }
+
+    std::fs::write(&config_path, new_lines.join("\n") + "\n")
+        .map_err(|e| format!("写入 config.toml 失败: {}", e))?;
+
+    if enable {
+        Ok("Fast 模式已开启（2x 额度消耗，更快推理）。重启 Codex 生效。".to_string())
+    } else {
+        Ok("Fast 模式已关闭。重启 Codex 生效。".to_string())
+    }
+}
+
+/// 获取当前 fast 模式状态
+#[tauri::command]
+fn get_codex_fast_mode() -> Result<bool, String> {
+    let config_path = dirs::home_dir()
+        .ok_or("无法获取用户目录")?
+        .join(".codex")
+        .join("config.toml");
+
+    if !config_path.exists() {
+        return Ok(false);
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("读取失败: {}", e))?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("profile") && trimmed.contains('=') {
+            return Ok(trimmed.contains("\"fast\""));
+        }
+    }
+
+    Ok(false)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncStatus {
     pub is_synced: bool,
@@ -1345,6 +1417,8 @@ pub fn run() {
             get_token_stats,
             reset_token_stats,
             show_main_window_cmd,
+            set_codex_fast_mode,
+            get_codex_fast_mode,
             check_sync_conflict,
             request_quarantine_fix_ticket,
             fix_codex_quarantine,

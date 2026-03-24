@@ -58,15 +58,18 @@ export function Proxy() {
     const [killing, setKilling] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
     const [switchedAccount, setSwitchedAccount] = useState<string | null>(null);
+    const [fastMode, setFastMode] = useState(false);
 
     const fetchAll = async () => {
         try {
-            const [s, st, ts] = await Promise.all([
+            const [s, st, ts, fm] = await Promise.all([
                 invoke<AppSettings>('get_settings'),
                 invoke<ProxyStatus>('get_proxy_status'),
                 invoke<TokenStats>('get_token_stats'),
+                invoke<boolean>('get_codex_fast_mode'),
             ]);
             setSettings(s);
+            setFastMode(fm);
             setStatus(st);
             setTokenStats(ts);
             setPort(s.proxy_port);
@@ -300,6 +303,34 @@ export function Proxy() {
                             移除
                         </button>
                     </div>
+                </div>
+            </div>
+
+            {/* Codex 配置 */}
+            <div className="settings-section">
+                <h3>Codex 配置</h3>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">Fast 模式</span>
+                        <span className="setting-desc">
+                            更快推理速度，但消耗 2x 额度。{fastMode ? '当前：已开启' : '当前：已关闭'}
+                        </span>
+                    </div>
+                    <button
+                        className={`proxy-toggle-btn ${fastMode ? 'on' : 'off'}`}
+                        onClick={async () => {
+                            try {
+                                const result = await invoke<string>('set_codex_fast_mode', { enable: !fastMode });
+                                setFastMode(!fastMode);
+                                setMessage({ type: 'success', text: result });
+                                setTimeout(() => setMessage(null), 3000);
+                            } catch (e) {
+                                setMessage({ type: 'error', text: `${e}` });
+                            }
+                        }}
+                    >
+                        {fastMode ? '关闭 Fast' : '开启 Fast'}
+                    </button>
                 </div>
             </div>
 
