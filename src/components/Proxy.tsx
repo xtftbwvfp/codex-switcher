@@ -29,28 +29,9 @@ interface AppSettings {
     proxy_free_guard: number;
 }
 
-interface TokenStats {
-    total_input_tokens: number;
-    total_cached_input_tokens: number;
-    total_output_tokens: number;
-    total_tokens: number;
-    total_cost_usd: number;
-    total_requests: number;
-    since: string;
-    last_month_cost: number | null;
-    last_month_tokens: number | null;
-}
-
-function formatTokens(n: number): string {
-    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
-    if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
-    return n.toString();
-}
-
 export function Proxy() {
     const [status, setStatus] = useState<ProxyStatus | null>(null);
     const [settings, setSettings] = useState<AppSettings | null>(null);
-    const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
     const [port, setPort] = useState(18080);
     const [copied, setCopied] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -62,16 +43,14 @@ export function Proxy() {
 
     const fetchAll = async () => {
         try {
-            const [s, st, ts, fm] = await Promise.all([
+            const [s, st, fm] = await Promise.all([
                 invoke<AppSettings>('get_settings'),
                 invoke<ProxyStatus>('get_proxy_status'),
-                invoke<TokenStats>('get_token_stats'),
                 invoke<boolean>('get_codex_fast_mode'),
             ]);
             setSettings(s);
             setFastMode(fm);
             setStatus(st);
-            setTokenStats(ts);
             setPort(s.proxy_port);
         } catch (e) {
             console.error('加载代理状态失败:', e);
@@ -178,41 +157,6 @@ export function Proxy() {
             {switchedAccount && (
                 <div className="settings-message success">
                     代理已自动切换到账号: {switchedAccount}
-                </div>
-            )}
-
-            {/* Token 用量统计卡片 */}
-            {tokenStats && tokenStats.total_tokens > 0 && (
-                <div className="usage-cards">
-                    <div className="usage-card cost">
-                        <div className="usage-card-icon">$</div>
-                        <div className="usage-card-content">
-                            <div className="usage-card-value">${tokenStats.total_cost_usd.toFixed(2)}</div>
-                            <div className="usage-card-label">Spent</div>
-                            {tokenStats.last_month_cost !== null && (
-                                <div className="usage-card-compare">
-                                    Vs 上月 ${tokenStats.last_month_cost.toFixed(2)}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                    <div className="usage-card tokens">
-                        <div className="usage-card-icon">#</div>
-                        <div className="usage-card-content">
-                            <div className="usage-card-value">{formatTokens(tokenStats.total_tokens)}</div>
-                            <div className="usage-card-label">Tokens</div>
-                            <div className="usage-card-detail">
-                                In {formatTokens(tokenStats.total_input_tokens)} / Out {formatTokens(tokenStats.total_output_tokens)}
-                            </div>
-                        </div>
-                    </div>
-                    <div className="usage-card requests">
-                        <div className="usage-card-icon">~</div>
-                        <div className="usage-card-content">
-                            <div className="usage-card-value">{tokenStats.total_requests}</div>
-                            <div className="usage-card-label">Requests</div>
-                        </div>
-                    </div>
                 </div>
             )}
 
@@ -428,40 +372,6 @@ export function Proxy() {
                 </div>
             </div>
 
-            {/* 运行指标 + 工作原理 */}
-            <div className="settings-section">
-                <h3>运行状态</h3>
-                <div className="proxy-info-card">
-                    {isRunning && (
-                        <>
-                            <div className="info-row">
-                                <span className="info-label">总请求数</span>
-                                <span>{status?.total_requests ?? 0}</span>
-                            </div>
-                            <div className="info-row">
-                                <span className="info-label">自动切号次数</span>
-                                <span>{status?.auto_switches ?? 0}</span>
-                            </div>
-                        </>
-                    )}
-                    <div className="info-row">
-                        <span className="info-label">监听地址</span>
-                        <code>127.0.0.1:{port}</code>
-                    </div>
-                    <div className="info-row">
-                        <span className="info-label">上游地址</span>
-                        <code>https://api.openai.com</code>
-                    </div>
-                    <div className="info-row">
-                        <span className="info-label">Token 来源</span>
-                        <span>当前激活账号（由 Codex CLI 维护刷新，代理实时回读）</span>
-                    </div>
-                    <div className="info-row">
-                        <span className="info-label">健康检查</span>
-                        <code>GET http://localhost:{port}/health</code>
-                    </div>
-                </div>
-            </div>
         </div>
     );
 }
