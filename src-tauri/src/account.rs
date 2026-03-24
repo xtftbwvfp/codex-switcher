@@ -43,6 +43,26 @@ pub struct AppSettings {
     /// 是否允许智能切号自动切换到免费账号
     #[serde(default = "default_false")]
     pub allow_auto_switch_to_free: bool,
+
+    /// 是否启用本地代理服务器
+    #[serde(default = "default_false")]
+    pub proxy_enabled: bool,
+
+    /// 代理服务器端口
+    #[serde(default = "default_proxy_port")]
+    pub proxy_port: u16,
+
+    /// 5h 配额预防性切号阈值（0=仅429触发，10=剩余<10%时切）
+    #[serde(default)]
+    pub proxy_threshold_5h: u8,
+
+    /// 周配额预防性切号阈值（0=仅429触发，5=剩余<5%时切）
+    #[serde(default)]
+    pub proxy_threshold_weekly: u8,
+
+    /// Free 账号保护线（0=不特殊处理，35=剩余<35%时切）
+    #[serde(default)]
+    pub proxy_free_guard: u8,
 }
 
 fn default_theme_palette() -> String {
@@ -65,6 +85,10 @@ fn default_false() -> bool {
     false
 }
 
+fn default_proxy_port() -> u16 {
+    18080
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -76,6 +100,11 @@ impl Default for AppSettings {
             inactive_refresh_days: default_inactive_refresh_days(),
             theme_palette: default_theme_palette(),
             allow_auto_switch_to_free: false,
+            proxy_enabled: false,
+            proxy_port: default_proxy_port(),
+            proxy_threshold_5h: 0,
+            proxy_threshold_weekly: 0,
+            proxy_free_guard: 0,
         }
     }
 }

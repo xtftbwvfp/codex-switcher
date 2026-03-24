@@ -1,0 +1,241 @@
+.proxy-page {
+    padding: 24px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.proxy-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+}
+
+.proxy-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+/* 状态徽章 */
+.proxy-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.proxy-status-badge.running {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success-color);
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.proxy-status-badge.stopped {
+    background: rgba(156, 163, 175, 0.1);
+    color: var(--text-muted);
+    border: 1px solid var(--border-color);
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+
+.proxy-status-badge.running .status-dot {
+    background: var(--success-color);
+    box-shadow: 0 0 6px var(--success-color);
+    animation: pulse 2s infinite;
+}
+
+.proxy-status-badge.stopped .status-dot {
+    background: var(--text-muted);
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* 代理开关按钮 */
+.proxy-toggle-btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.proxy-toggle-btn.off {
+    background: var(--primary-color);
+    color: white;
+}
+
+.proxy-toggle-btn.off:hover:not(:disabled) {
+    background: var(--primary-hover);
+    transform: translateY(-1px);
+}
+
+.proxy-toggle-btn.on {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--danger-color);
+    border: 1px solid var(--danger-color);
+}
+
+.proxy-toggle-btn.on:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.2);
+}
+
+.proxy-toggle-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* 端口输入组 */
+.port-input-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* 环境变量按钮组 */
+.env-btn-group {
+    display: flex;
+    gap: 8px;
+}
+
+/* 工作原理卡片 */
+.proxy-info-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 13px;
+}
+
+.info-row:last-child {
+    border-bottom: none;
+}
+
+.info-label {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.info-row code {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    color: var(--primary-color);
+    background: var(--input-bg);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.info-row span:not(.info-label) {
+    color: var(--text-primary);
+}
+
+/* 阈值输入组 */
+.threshold-input-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.threshold-unit {
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+/* ===== Token 用量卡片 ===== */
+.usage-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+}
+
+.usage-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 20px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.usage-card-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+.usage-card.cost .usage-card-icon {
+    background: rgba(250, 204, 21, 0.15);
+    color: #facc15;
+}
+
+.usage-card.tokens .usage-card-icon {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+}
+
+.usage-card.requests .usage-card-icon {
+    background: rgba(168, 85, 247, 0.15);
+    color: #a855f7;
+}
+
+.usage-card-content {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.usage-card-value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+}
+
+.usage-card-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.usage-card-detail {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.usage-card-compare {
+    font-size: 11px;
+    color: var(--primary-color);
+    margin-top: 2px;
+}

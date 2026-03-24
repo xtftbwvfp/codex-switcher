@@ -1,22 +1,19 @@
-use crate::AppState;
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
-    tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    tray::{TrayIcon, TrayIconBuilder, TrayIconEvent},
+    webview::WebviewWindowBuilder,
+    AppHandle, Manager,
 };
 
 /// 初始化系统托盘
 pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let app_handle = app.clone();
-
-    // 加载并按照 Antigravity 标准比例 (81.8%) 缩放原始 Squircle 图标
+    // 加载并缩放图标
     let icon_bytes = include_bytes!("../icons/app-icon-squircle.png");
     let base_img =
         image::load_from_memory(icon_bytes).map_err(|e| format!("加载图标失败: {}", e))?;
 
     let target_size = 128;
-    let content_size = 105; // 128 * 0.818
+    let content_size = 105;
     let padding = (target_size - content_size) / 2;
 
     let scaled_content = base_img.resize(
@@ -36,196 +33,141 @@ pub fn init(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let (width, height) = final_img.dimensions();
     let icon = Image::new_owned(final_img.into_raw(), width, height);
 
-    // 初始菜单
-    let menu = Menu::new(app)?;
-
     let _tray = TrayIconBuilder::with_id("main")
         .icon(icon)
-        .menu(&menu)
-        .icon_as_template(false) // 关键：在 macOS 上强制禁用 Template 模式，以显示彩色图标
-        .show_menu_on_left_click(false) // 关键：左键点击不弹出菜单，由我们自定义处理
-        .on_menu_event(move |app: &AppHandle, event| {
-            let app_handle = app.clone();
-            match event.id.as_ref() {
-                "next" => {
-                    tauri::async_runtime::spawn(async move {
-                        let state = app_handle.state::<AppState>();
-                        let _ = crate::switch_to_next_account_internal(state, app_handle.clone()).await;
-                        update_tray_menu(&app_handle);
-                        if let Some(win) = app_handle.get_webview_window("main") {
-                            let _ = win.emit("accounts-updated", ());
-                        }
-                    });
-                }
-                "refresh" => {
-                    tauri::async_runtime::spawn(async move {
-                        let state = app_handle.state::<AppState>();
-                        let current_id = {
-                            let store = state.store.lock().unwrap();
-                            store.current.clone()
-                        };
-                        if let Some(id) = current_id {
-                            let _ = crate::get_quota_by_id(state, app_handle.clone(), id).await;
-                            update_tray_menu(&app_handle);
-                        }
-                    });
-                }
-                "show" => {
-                    show_main_window(&app_handle);
-                }
-                "exit" => {
-                    app_handle.exit(0);
-                }
-                _ => {}
-            }
-        })
+        .icon_as_template(false)
+        .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray: &TrayIcon, event: TrayIconEvent| {
-            // 核心：仅处理左键点击以显示窗口。
-            // 不要处理右键点击，由系统自动处理菜单弹出，否则会造成菜单闪退。
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                position,
                 ..
             } = event
             {
-                show_main_window(tray.app_handle());
+                // 任意点击 → 弹出 popup
+                toggle_popup(tray.app_handle(), position);
             }
         })
         .build(app)?;
 
-    // 初始生成菜单内容
-    update_tray_menu(&app_handle);
-
-    println!("✅ 系统托盘已启动 (已修复右键闪退与颜色问题)");
+    println!("[Tray] 系统托盘已启动");
     Ok(())
 }
 
-fn show_main_window(app: &AppHandle) {
+/// 显示/隐藏 tray popup 窗口
+fn toggle_popup(app: &AppHandle, position: tauri::PhysicalPosition<f64>) {
+    let label = "tray-popup";
+
+    // 如果已存在，切换显示/隐藏
+    if let Some(win) = app.get_webview_window(label) {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.hide();
+            return;
+        }
+        // 重新定位并显示
+        let _ = position_popup(&win, position);
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+
+    // 首次创建
+    let popup_width = 380.0;
+    let popup_height = 410.0;
+
+    let url = tauri::WebviewUrl::App("index.html".into());
+
+    match WebviewWindowBuilder::new(app, label, url)
+        .title("Codex Switcher")
+        .inner_size(popup_width, popup_height)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .build()
+    {
+        Ok(win) => {
+            // 监听焦点丢失 → 自动隐藏
+            let win_clone = win.clone();
+            win.on_window_event(move |event| {
+                if let tauri::WindowEvent::Focused(false) = event {
+                    let _ = win_clone.hide();
+                }
+            });
+
+            let _ = position_popup(&win, position);
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        Err(e) => eprintln!("[Tray] 创建 popup 窗口失败: {}", e),
+    }
+}
+
+/// 将 popup 窗口定位到托盘图标附近（macOS 顶部菜单栏下方）
+fn position_popup(
+    win: &tauri::WebviewWindow,
+    tray_pos: tauri::PhysicalPosition<f64>,
+) -> Result<(), String> {
+    let popup_width = 380.0;
+
+    let scale = win.scale_factor().unwrap_or(1.0);
+
+    let x = (tray_pos.x - popup_width * scale / 2.0).max(0.0) as i32;
+    let y = (tray_pos.y + 4.0) as i32; // 留一点间距给菜单栏
+
+    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        x, y,
+    )));
+    Ok(())
+}
+
+pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show().unwrap_or(());
-        let _ = window.unminimize().unwrap_or(());
-        let _ = window.set_focus().unwrap_or(());
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
         #[cfg(target_os = "macos")]
         app.set_activation_policy(tauri::ActivationPolicy::Regular)
             .unwrap_or(());
     }
 }
 
-/// 重构后的菜单刷新逻辑：每次重建 Menu 对象以确保 UI 稳定性
+/// 供 Tauri command 调用的入口
+pub fn show_main_window_from_cmd(app: &AppHandle) {
+    show_main_window(app);
+    // 同时隐藏 popup
+    if let Some(popup) = app.get_webview_window("tray-popup") {
+        let _ = popup.hide();
+    }
+}
+
+/// 更新托盘 tooltip（不再需要完整菜单）
 pub fn update_tray_menu(app: &AppHandle) {
-    let app_handle = app.clone();
+    let state = app.state::<crate::AppState>();
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
 
-    tauri::async_runtime::spawn(async move {
-        let state = app_handle.state::<AppState>();
-        let (email_text, gemini_text, claude_text) = {
-            let store = state.store.lock().unwrap();
-            let current_acc = store.current.as_ref().and_then(|id| store.accounts.get(id));
-
-            if let Some(acc) = current_acc {
-                let q = &acc.cached_quota;
-                (
-                    format!("当前: {}", acc.name),
-                    q.as_ref()
-                        .map(|v| format!("{}: {}%", v.five_hour_label, v.five_hour_left as i32))
-                        .unwrap_or_else(|| "Gemini: -".into()),
-                    q.as_ref()
-                        .map(|v| format!("{}: {}%", v.weekly_label, v.weekly_left as i32))
-                        .unwrap_or_else(|| "Claude: -".into()),
-                )
-            } else {
-                (
-                    "当前: 未登录".into(),
-                    "Gemini: -".into(),
-                    "Claude: -".into(),
-                )
-            }
-        };
-
-        // 2. 构建菜单项
-        let info_i = MenuItemBuilder::with_id("info", email_text)
-            .enabled(false)
-            .build(&app_handle)
-            .ok();
-        let gemini_i = MenuItemBuilder::with_id("gemini", gemini_text)
-            .enabled(false)
-            .build(&app_handle)
-            .ok();
-        let claude_i = MenuItemBuilder::with_id("claude", claude_text)
-            .enabled(false)
-            .build(&app_handle)
-            .ok();
-
-        let sep1 = PredefinedMenuItem::separator(&app_handle).ok();
-
-        // 获取下个账号预览
-        let next_preview = crate::predict_next_account_internal(state);
-        let next_label = match next_preview {
-            Some((name, quota)) => format!("切换下一个账号 (下个: {} {}%)", name, quota),
-            None => "切换下一个账号 (无可用备选)".into(),
-        };
-
-        let next_acc = MenuItemBuilder::with_id("next", next_label)
-            .build(&app_handle)
-            .ok();
-        let refresh_acc = MenuItemBuilder::with_id("refresh", "刷新当前账号额度")
-            .build(&app_handle)
-            .ok();
-
-        let sep2 = PredefinedMenuItem::separator(&app_handle).ok();
-        let show_win = MenuItemBuilder::with_id("show", "显示主窗口")
-            .build(&app_handle)
-            .ok();
-
-        let sep3 = PredefinedMenuItem::separator(&app_handle).ok();
-        let exit = MenuItemBuilder::with_id("exit", "退出应用 (Exit)")
-            .build(&app_handle)
-            .ok();
-
-        // 3. 构建菜单数组
-        let mut items = Vec::new();
-        if let Some(i) = info_i {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
+    let tooltip = if let Some(current_id) = &store.current {
+        if let Some(acc) = store.accounts.get(current_id) {
+            let quota = acc
+                .cached_quota
+                .as_ref()
+                .map(|q| format!(" | 5H: {:.0}%  周: {:.0}%", q.five_hour_left, q.weekly_left))
+                .unwrap_or_default();
+            format!("Codex Switcher - {}{}", acc.name, quota)
+        } else {
+            "Codex Switcher".to_string()
         }
-        if let Some(i) = gemini_i {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-        if let Some(i) = claude_i {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
+    } else {
+        "Codex Switcher - 未登录".to_string()
+    };
 
-        if let Some(s) = sep1 {
-            items.push(Box::new(s) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-        if let Some(i) = next_acc {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-        if let Some(i) = refresh_acc {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-
-        if let Some(s) = sep2 {
-            items.push(Box::new(s) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-        if let Some(i) = show_win {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-
-        if let Some(s) = sep3 {
-            items.push(Box::new(s) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-        if let Some(i) = exit {
-            items.push(Box::new(i) as Box<dyn tauri::menu::IsMenuItem<_>>);
-        }
-
-        let item_refs: Vec<&dyn tauri::menu::IsMenuItem<_>> =
-            items.iter().map(|b| b.as_ref()).collect();
-
-        // 4. 应用新菜单并维持属性
-        if let Ok(new_menu) = Menu::with_items(&app_handle, &item_refs) {
-            if let Some(tray) = app_handle.tray_by_id("main") {
-                let _ = tray.set_menu(Some(new_menu));
-                // 重要：在某些平台上，set_menu 可能会重置点击行为，这里再次声明。
-                let _ = tray.set_show_menu_on_left_click(false);
-            }
-        }
-    });
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(&tooltip));
+    }
 }

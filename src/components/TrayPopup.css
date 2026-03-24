@@ -1,0 +1,288 @@
+/* ===== 容器层透明 ===== */
+html.is-tray-popup,
+body.is-tray-popup,
+.is-tray-popup #root {
+    background: transparent !important;
+    background-color: transparent !important;
+    margin: 0;
+    padding: 0;
+}
+
+/* ===== 主面板 ===== */
+.tray-popup {
+    width: 100%;
+    height: 100vh;
+    box-sizing: border-box;
+    background: linear-gradient(160deg, #1e1245 0%, #2a1754 40%, #1c1040 100%);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 16px 18px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+    color: #e8e0f0;
+    overflow: hidden;
+    user-select: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* ===== Header ===== */
+.tp-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.tp-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.tp-logo {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
+    background: linear-gradient(135deg, #7c5ce0, #9f7aea);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 17px;
+    box-shadow: 0 2px 8px rgba(124, 92, 224, 0.4);
+}
+
+.tp-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: #fff;
+}
+
+.tp-subtitle {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: 0.3px;
+}
+
+.tp-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 10px;
+}
+
+.tp-badge.running {
+    color: #34d399;
+    border: 1px solid rgba(52, 211, 153, 0.3);
+    background: rgba(52, 211, 153, 0.08);
+}
+
+/* ===== 账号 ===== */
+.tp-account {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.6);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: -4px;
+}
+
+.tp-plan {
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 4px;
+    background: rgba(139, 92, 246, 0.2);
+    color: #b794f6;
+    font-weight: 600;
+}
+
+.tp-banned {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+    font-weight: 700;
+}
+
+/* ===== 卡片网格 ===== */
+.tp-cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+/* ===== 单张卡片 ===== */
+.tp-card {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.tp-card-header {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-bottom: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.4);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+}
+
+.tp-card-icon {
+    font-size: 12px;
+}
+
+.tp-status {
+    margin-left: auto;
+    font-size: 8px;
+    font-weight: 800;
+    padding: 1px 5px;
+    border-radius: 3px;
+    letter-spacing: 0.3px;
+}
+
+.tp-status.healthy {
+    background: rgba(52, 211, 153, 0.15);
+    color: #34d399;
+}
+
+.tp-status.warning {
+    background: rgba(251, 191, 36, 0.15);
+    color: #fbbf24;
+}
+
+.tp-status.critical {
+    background: rgba(248, 113, 113, 0.15);
+    color: #f87171;
+}
+
+/* ===== 数值 ===== */
+.tp-card-value {
+    font-size: 28px;
+    font-weight: 800;
+    color: #fff;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+
+.tp-unit {
+    font-size: 15px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.5);
+}
+
+.tp-remaining {
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(255, 255, 255, 0.35);
+    margin-left: 4px;
+}
+
+.cost-value {
+    font-size: 24px;
+    color: #fbbf24;
+}
+
+.token-value {
+    font-size: 24px;
+    color: #34d399;
+}
+
+/* ===== 进度条 ===== */
+.tp-progress {
+    height: 3px;
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 2px;
+    margin-bottom: 6px;
+    overflow: hidden;
+}
+
+.tp-progress-bar {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease;
+}
+
+.tp-progress-bar.healthy {
+    background: linear-gradient(90deg, #7c5ce0, #34d399);
+}
+
+.tp-progress-bar.warning {
+    background: linear-gradient(90deg, #fbbf24, #f87171);
+}
+
+.tp-progress-bar.critical {
+    background: #f87171;
+}
+
+/* ===== 底部信息 ===== */
+.tp-reset {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.3);
+}
+
+.tp-compare {
+    font-size: 10px;
+    color: #b794f6;
+    margin-top: 2px;
+}
+
+.tp-token-detail {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.35);
+}
+
+/* ===== 按钮栏 ===== */
+.tp-actions {
+    display: flex;
+    gap: 6px;
+    margin-top: auto;
+}
+
+.tp-btn {
+    flex: 1;
+    padding: 7px 0;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: inherit;
+    text-align: center;
+}
+
+.tp-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+}
+
+.tp-btn.primary {
+    background: linear-gradient(135deg, #7c5ce0, #6d4ed4);
+    border-color: rgba(124, 92, 224, 0.3);
+    color: #fff;
+}
+
+.tp-btn.primary:hover {
+    background: linear-gradient(135deg, #9f7aea, #7c5ce0);
+}
+
+.tp-btn.accent {
+    background: rgba(52, 211, 153, 0.1);
+    border-color: rgba(52, 211, 153, 0.2);
+    color: #34d399;
+}
+
+.tp-btn.accent:hover {
+    background: rgba(52, 211, 153, 0.2);
+}
+
+.tp-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}

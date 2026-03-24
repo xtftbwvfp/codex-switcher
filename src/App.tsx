@@ -9,10 +9,11 @@ import { AddAccountModal } from './components/AddAccountModal';
 import { Dashboard } from './components/Dashboard';
 import { AccountList } from './components/AccountList';
 import { Settings } from './components/Settings';
+import { Proxy } from './components/Proxy';
 import { ConfirmModal } from './components/ConfirmModal';
 import './App.css';
 
-type PageType = 'dashboard' | 'accounts' | 'settings';
+type PageType = 'dashboard' | 'accounts' | 'proxy' | 'settings';
 
 function App() {
   const {
@@ -281,6 +282,12 @@ function App() {
             账号管理
           </button>
           <button
+            className={`nav-item ${currentPage === 'proxy' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('proxy')}
+          >
+            代理
+          </button>
+          <button
             className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
             onClick={() => setCurrentPage('settings')}
           >
@@ -359,6 +366,8 @@ function App() {
             onUpdateSettings={updateSettings}
             onRefreshComplete={refresh}
           />
+        ) : currentPage === 'proxy' ? (
+          <Proxy />
         ) : (
           <Settings />
         )}

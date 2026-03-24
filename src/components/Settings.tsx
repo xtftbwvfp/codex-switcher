@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Palette, Server, Monitor, Wrench, Save } from 'lucide-react';
+import { Palette, Server, Monitor, Wrench, Save, Github } from 'lucide-react';
 import './Settings.css';
 
 interface AppSettings {
@@ -12,6 +12,8 @@ interface AppSettings {
     inactive_refresh_days: number;
     theme_palette: string;
     allow_auto_switch_to_free: boolean;
+    proxy_enabled: boolean;
+    proxy_port: number;
 }
 
 const IDE_OPTIONS = [
@@ -32,6 +34,8 @@ export function Settings() {
         inactive_refresh_days: 7,
         theme_palette: 'midnight',
         allow_auto_switch_to_free: false,
+        proxy_enabled: false,
+        proxy_port: 18080,
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
@@ -265,6 +269,24 @@ export function Settings() {
                     >
                         {repairing ? '修复中...' : '立即修复'}
                     </button>
+                </div>
+            </div>
+
+            <div className="settings-section">
+                <h3><Github size={16} /> 关于</h3>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">Codex Switcher</span>
+                        <span className="setting-desc">多账号智能切换 + 本地代理 + 用量统计</span>
+                    </div>
+                    <a
+                        className="action-button github-link"
+                        href="https://github.com/xtftbwvfp/codex-switcher"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                    >
+                        <Github size={14} /> GitHub
+                    </a>
                 </div>
             </div>
         </div >

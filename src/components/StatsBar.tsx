@@ -1,5 +1,15 @@
+import { useState, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { UsageDisplay } from '../hooks/useUsage';
 import './StatsBar.css';
+
+interface ProxyStatus {
+    enabled: boolean;
+    port: number;
+    is_running: boolean;
+    base_url: string;
+}
 
 interface StatsBarProps {
     accountCount: number;
@@ -7,6 +17,24 @@ interface StatsBarProps {
 }
 
 export function StatsBar({ accountCount, usage }: StatsBarProps) {
+    const [proxyStatus, setProxyStatus] = useState<ProxyStatus | null>(null);
+
+    const fetchProxyStatus = async () => {
+        try {
+            const status = await invoke<ProxyStatus>('get_proxy_status');
+            setProxyStatus(status);
+        } catch {
+            setProxyStatus(null);
+        }
+    };
+
+    useEffect(() => {
+        fetchProxyStatus();
+        const unlisten = listen('settings-updated', () => {
+            fetchProxyStatus();
+        });
+        return () => { unlisten.then(fn => fn()); };
+    }, []);
     return (
         <div className="stats-bar">
             <div className="stat-card">
@@ -49,6 +77,21 @@ export function StatsBar({ accountCount, usage }: StatsBarProps) {
                     <div className="stat-info">
                         <div className="stat-value">${usage.credits_balance?.toFixed(2) ?? '0.00'}</div>
                         <div className="stat-label">额度余额</div>
+                    </div>
+                </div>
+            )}
+
+            {proxyStatus?.enabled && (
+                <div className="stat-card">
+                    <div className={`stat-icon ${proxyStatus.is_running ? 'green' : 'red'}`}>
+                        {proxyStatus.is_running ? '🔗' : '🔌'}
+                    </div>
+                    <div className="stat-info">
+                        <div className="stat-value">:{proxyStatus.port}</div>
+                        <div className="stat-label">代理</div>
+                        <div className={`stat-hint ${proxyStatus.is_running ? 'good' : 'warn'}`}>
+                            {proxyStatus.is_running ? '运行中' : '已停止'}
+                        </div>
                     </div>
                 </div>
             )}

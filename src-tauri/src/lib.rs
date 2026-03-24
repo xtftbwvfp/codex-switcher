@@ -6,7 +6,9 @@ mod account;
 mod ide_control;
 mod oauth;
 mod oauth_server;
+mod proxy;
 mod refresh_lock;
+mod token_tracker;
 mod scheduler;
 mod tray;
 mod usage;
@@ -61,6 +63,9 @@ fn detect_sync_conflict_for_current(
 pub struct AppState {
     pub store: std::sync::Arc<std::sync::Mutex<AccountStore>>,
     pub scheduler: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    pub proxy_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    pub proxy_stats: std::sync::Arc<proxy::ProxyStats>,
+    pub token_tracker: std::sync::Arc<token_tracker::TokenTracker>,
     pub refresh_locks: RefreshLockManager,
     quarantine_fix_ticket: std::sync::Mutex<Option<QuarantineFixTicket>>,
 }
@@ -70,6 +75,9 @@ impl AppState {
         Self {
             store: std::sync::Arc::new(std::sync::Mutex::new(AccountStore::load())),
             scheduler: std::sync::Mutex::new(None),
+            proxy_handle: std::sync::Mutex::new(None),
+            proxy_stats: std::sync::Arc::new(proxy::ProxyStats::default()),
+            token_tracker: token_tracker::TokenTracker::new(),
             refresh_locks: RefreshLockManager::default(),
             quarantine_fix_ticket: std::sync::Mutex::new(None),
         }
@@ -135,6 +143,36 @@ fn get_settings(state: State<AppState>) -> Result<account::AppSettings, String> 
     Ok(store.settings.clone())
 }
 
+/// 代理状态信息
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProxyStatus {
+    pub enabled: bool,
+    pub port: u16,
+    pub is_running: bool,
+    pub base_url: String,
+    pub total_requests: u64,
+    pub auto_switches: u64,
+}
+
+/// 获取代理状态
+#[tauri::command]
+fn get_proxy_status(state: State<AppState>) -> Result<ProxyStatus, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let is_running = state
+        .proxy_handle
+        .lock()
+        .map(|h| h.is_some())
+        .unwrap_or(false);
+    Ok(ProxyStatus {
+        enabled: store.settings.proxy_enabled,
+        port: store.settings.proxy_port,
+        is_running,
+        base_url: format!("http://localhost:{}/v1", store.settings.proxy_port),
+        total_requests: state.proxy_stats.total_requests.load(std::sync::atomic::Ordering::Relaxed),
+        auto_switches: state.proxy_stats.auto_switches.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
 /// 更新全局设置
 #[tauri::command]
 fn update_settings(
@@ -142,20 +180,20 @@ fn update_settings(
     app: tauri::AppHandle,
     settings: account::AppSettings,
 ) -> Result<(), String> {
-    let previous = {
+    let (prev_bg_refresh, prev_proxy_enabled) = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let previous = store.settings.background_refresh;
+        let prev = (store.settings.background_refresh, store.settings.proxy_enabled);
         store.settings = settings.clone();
         store.save()?;
-        previous
+        prev
     };
 
     // 联动刷新托盘菜单文案 (同步更新“下个账号”预览)
     crate::tray::update_tray_menu(&app);
 
+    // 后台刷新生命周期
     let mut scheduler_handle = state.scheduler.lock().map_err(|e| e.to_string())?;
-
-    match (previous, settings.background_refresh) {
+    match (prev_bg_refresh, settings.background_refresh) {
         (false, true) => {
             if scheduler_handle.is_none() {
                 let handle = scheduler::start(state.store.clone(), app.clone());
@@ -169,6 +207,32 @@ fn update_settings(
         }
         _ => {}
     }
+
+    // 代理生命周期
+    let mut proxy_handle = state.proxy_handle.lock().map_err(|e| e.to_string())?;
+    match (prev_proxy_enabled, settings.proxy_enabled) {
+        (false, true) => {
+            if proxy_handle.is_none() {
+                let handle = proxy::start(
+                    state.store.clone(),
+                    settings.proxy_port,
+                    app.clone(),
+                    state.proxy_stats.clone(),
+                    state.token_tracker.clone(),
+                );
+                *proxy_handle = Some(handle);
+                println!("[Proxy] 代理已启动 (端口 {})", settings.proxy_port);
+            }
+        }
+        (true, false) => {
+            if let Some(handle) = proxy_handle.take() {
+                handle.abort();
+                println!("[Proxy] 代理已停止");
+            }
+        }
+        _ => {}
+    }
+
     app.emit("settings-updated", ()).ok();
     Ok(())
 }
@@ -509,138 +573,128 @@ async fn switch_account(
 }
 
 /// 预测下一个拟切换的账号信息 (仅基于缓存，不发起网络请求)
-pub fn predict_next_account_internal(state: tauri::State<'_, AppState>) -> Option<(String, i32)> {
-    let (accounts, current_id, allow_free) = {
-        let store = match state.store.lock() {
-            Ok(s) => s,
-            Err(_) => return None,
-        };
-        (
-            store
-                .list_accounts()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            store.current.clone(),
-            store.settings.allow_auto_switch_to_free,
-        )
-    };
+/// 共享评分选号算法：基于 CachedQuota 的 reset_at 时间戳和剩余额度评分
+/// 返回 (account_id, account_name, score) 按得分从高到低排序
+pub fn score_candidate_accounts(
+    store: &AccountStore,
+) -> Vec<(String, String, f64)> {
+    let current_id = store.current.as_deref().unwrap_or("");
+    let allow_free = store.settings.allow_auto_switch_to_free;
+    let now = chrono::Utc::now().timestamp();
 
-    if accounts.is_empty() {
-        return None;
-    }
+    let mut scored: Vec<(String, String, f64)> = Vec::new();
 
-    let current_idx = current_id
-        .as_ref()
-        .and_then(|id| accounts.iter().position(|a| &a.id == id))
-        .unwrap_or(accounts.len() - 1);
-
-    // 尝试寻找下一个有额度的账号 (必须跳过当前账号)
-    let search_limit = accounts.len().saturating_sub(1);
-    for i in 1..=search_limit {
-        let idx = (current_idx + i) % accounts.len();
-        let target = &accounts[idx];
-
-        if let Some(q) = &target.cached_quota {
-            let plan = q.plan_type.to_lowercase();
-            let is_free = plan == "free" || plan == "unknown";
-
-            if is_free && !allow_free {
-                continue;
-            }
-
-            let has_quota = if is_free {
-                q.five_hour_left > 0.0
-            } else {
-                q.five_hour_left > 0.0 && q.weekly_left > 0.0
-            };
-
-            if has_quota {
-                return Some((target.name.clone(), q.five_hour_left as i32));
-            }
+    for account in store.accounts.values() {
+        if account.id == current_id || account.is_banned {
+            continue;
         }
+
+        let score = match &account.cached_quota {
+            None => 100.0, // 无缓存 → 假设满额度
+            Some(q) => {
+                let plan = q.plan_type.to_lowercase();
+                let is_free = plan == "free" || plan == "unknown";
+
+                if is_free && !allow_free {
+                    continue;
+                }
+
+                // 5h 可用度
+                let five_h = if q.five_hour_left <= 0.0 {
+                    match q.five_hour_reset_at {
+                        Some(reset_at) if now >= reset_at => 100.0,
+                        _ => 0.0,
+                    }
+                } else {
+                    q.five_hour_left
+                };
+
+                // 周可用度
+                let weekly = if q.weekly_left <= 0.0 {
+                    match q.weekly_reset_at {
+                        Some(reset_at) if now >= reset_at => 100.0,
+                        _ => 0.0,
+                    }
+                } else {
+                    q.weekly_left
+                };
+
+                let effective = if is_free { five_h } else { five_h.min(weekly) };
+                if effective <= 0.0 {
+                    continue;
+                }
+                effective
+            }
+        };
+
+        scored.push((account.id.clone(), account.name.clone(), score));
     }
-    None
+
+    // 按得分从高到低排序
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    scored
 }
 
-/// 内部使用的切换到下一个账号逻辑 (智能切号)
+/// 预测下一个最优账号（tray 菜单预览）
+pub fn predict_next_account_internal(state: tauri::State<'_, AppState>) -> Option<(String, i32)> {
+    let store = state.store.lock().ok()?;
+    let candidates = score_candidate_accounts(&store);
+    candidates.first().map(|(_, name, score)| (name.clone(), *score as i32))
+}
+
+/// 智能切号：选最优账号并切换
 pub async fn switch_to_next_account_internal(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let (accounts, current_id, allow_free) = {
+    // 1. 用评分算法选出最优候选
+    let candidates = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        (
-            store
-                .list_accounts()
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>(),
-            store.current.clone(),
-            store.settings.allow_auto_switch_to_free,
-        )
+        score_candidate_accounts(&store)
     };
 
-    if accounts.is_empty() {
+    if candidates.is_empty() {
         return Err("没有可用账号".to_string());
     }
 
-    let current_idx = current_id
-        .as_ref()
-        .and_then(|id| accounts.iter().position(|a| &a.id == id))
-        .unwrap_or(accounts.len() - 1); // 如果当前没激活，从头开始搜索 (+1 后为 0)
+    // 2. 按得分从高到低尝试，查 API 确认额度后切换
+    for (target_id, target_name, score) in &candidates {
+        println!(
+            "[SmartSwitch] 候选: {} (评分 {:.0})",
+            target_name, score
+        );
 
-    // 尝试寻找下一个有额度的账号
-    // 尝试寻找下一个有额度的账号 (必须跳过当前账号)
-    let search_limit = accounts.len().saturating_sub(1);
-    for i in 1..=search_limit {
-        let idx = (current_idx + i) % accounts.len();
-        let target = &accounts[idx];
-
-        // 1. 获取最新额度信息 (不切换，仅刷新数据)
-        // 注意：此处调用 get_quota_by_id 的内部逻辑部分
-        let quota = match get_quota_internal(&state, target.id.clone()).await {
-            Ok(u) => Some(u),
+        // 查 API 确认最新额度
+        let quota = match get_quota_internal(&state, target_id.clone()).await {
+            Ok(u) => u,
             Err(e) => {
-                println!("[SmartSwitch] 账号 {} 刷新额度失败: {}", target.name, e);
-                None
+                // 封号检测
+                if e.contains("ACCOUNT_BANNED") {
+                    println!("[SmartSwitch] 账号 {} 已封号，跳过", target_name);
+                    continue;
+                }
+                println!("[SmartSwitch] 账号 {} 额度查询失败: {}，跳过", target_name, e);
+                continue;
             }
         };
 
-        if let Some(q) = quota {
-            let plan = q.plan_type.to_lowercase();
-            let is_free = plan == "free" || plan == "unknown";
+        let plan = quota.plan_type.to_lowercase();
+        let is_free = plan == "free" || plan == "unknown";
 
-            // 2. 检查切 FREE 开关
-            if is_free && !allow_free {
-                println!("[SmartSwitch] 跳过免费账号: {}", target.name);
-                continue;
-            }
-
-            // 3. 检查配额
-            let has_quota = if is_free {
-                // 免费账号只看 five_hour_left (其实是当前限额)
-                q.five_hour_left > 0
-            } else {
-                // 付费账号必须 5h 和 周 都有额度
-                q.five_hour_left > 0 && q.weekly_left > 0
-            };
-
-            if has_quota {
-                println!(
-                    "[SmartSwitch] 发现可用账号: {} ({})",
-                    target.name, q.plan_type
-                );
-                return switch_account(state, app.clone(), target.id.clone()).await;
-            } else {
-                println!("[SmartSwitch] 账号 {} 额度已耗尽，跳过", target.name);
-            }
+        let has_quota = if is_free {
+            quota.five_hour_left > 0
         } else {
-            // 如果刷新失败，保底行为：跳过该账号，继续找下一个
+            quota.five_hour_left > 0 && quota.weekly_left > 0
+        };
+
+        if has_quota {
             println!(
-                "[SmartSwitch] 无法确认账号 {} 额度状态，跳过以策安全",
-                target.name
+                "[SmartSwitch] 选中最优账号: {} ({}, 5h={}%, 周={}%)",
+                target_name, quota.plan_type, quota.five_hour_left, quota.weekly_left
             );
+            return switch_account(state, app.clone(), target_id.clone()).await;
+        } else {
+            println!("[SmartSwitch] 账号 {} 额度已耗尽，继续找", target_name);
         }
     }
 
@@ -957,6 +1011,87 @@ async fn reload_ide_windows(use_window_reload: bool) -> Result<Vec<String>, Stri
     Ok(reloaded)
 }
 
+/// 获取 Token 用量统计
+#[tauri::command]
+fn get_token_stats(state: State<AppState>) -> Result<token_tracker::UsageStats, String> {
+    Ok(state.token_tracker.get_stats())
+}
+
+/// 重置 Token 用量统计
+#[tauri::command]
+fn reset_token_stats(state: State<AppState>) -> Result<(), String> {
+    state.token_tracker.reset();
+    Ok(())
+}
+
+/// 显示主窗口（供 tray popup 调用）
+#[tauri::command]
+fn show_main_window_cmd(app: tauri::AppHandle) {
+    crate::tray::show_main_window_from_cmd(&app);
+}
+
+/// 杀死所有 codex 进程（供代理页面使用）
+#[tauri::command]
+fn kill_codex_processes() -> Result<String, String> {
+    let output = std::process::Command::new("pkill")
+        .arg("-9")
+        .arg("-f")
+        .arg("codex")
+        .output()
+        .map_err(|e| format!("执行 pkill 失败: {}", e))?;
+
+    if output.status.success() {
+        Ok("已终止所有 codex 进程".to_string())
+    } else {
+        Ok("未找到运行中的 codex 进程".to_string())
+    }
+}
+
+/// 写入 shell 配置文件中的 OPENAI_BASE_URL 环境变量
+#[tauri::command]
+fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
+    let home = dirs::home_dir().ok_or("无法获取用户目录")?;
+    let env_line = format!("export OPENAI_BASE_URL=http://localhost:{}/v1", port);
+    let marker = "# codex-switcher-proxy";
+
+    // 尝试写入 .zshrc 和 .bashrc
+    let mut updated_files = Vec::new();
+    for rc_name in &[".zshrc", ".bashrc"] {
+        let rc_path = home.join(rc_name);
+        if !rc_path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&rc_path)
+            .map_err(|e| format!("读取 {} 失败: {}", rc_name, e))?;
+
+        // 移除旧的代理配置行
+        let cleaned: Vec<&str> = content
+            .lines()
+            .filter(|line| !line.contains(marker))
+            .collect();
+        let mut new_content = cleaned.join("\n");
+
+        // 如果启用，追加新行
+        if enable {
+            if !new_content.ends_with('\n') {
+                new_content.push('\n');
+            }
+            new_content.push_str(&format!("{} {}\n", env_line, marker));
+        }
+
+        std::fs::write(&rc_path, &new_content)
+            .map_err(|e| format!("写入 {} 失败: {}", rc_name, e))?;
+        updated_files.push(rc_name.to_string());
+    }
+
+    if updated_files.is_empty() {
+        return Err("未找到 .zshrc 或 .bashrc 文件".to_string());
+    }
+
+    let status = if enable { "已写入" } else { "已移除" };
+    Ok(format!("{} 环境变量 ({})", status, updated_files.join(", ")))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SyncStatus {
     pub is_synced: bool,
@@ -984,7 +1119,28 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let disk_email = AccountStore::extract_email(&disk_auth);
 
-    // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
+    // 快速路径：先检查磁盘 auth 与当前激活账号是否身份一致
+    // 这解决了 JWT 过期/损坏导致 email 提取失败的误报问题
+    let current_matches_disk = store.current.as_ref().and_then(|curr_id| {
+        store.accounts.get(curr_id).map(|a| {
+            AccountStore::auth_identity_matches(&a.auth_json, &disk_auth)
+                || disk_email
+                    .as_deref()
+                    .map(|e| a.name.to_lowercase() == e.to_lowercase())
+                    .unwrap_or(false)
+        })
+    }).unwrap_or(false);
+
+    if current_matches_disk {
+        return Ok(SyncStatus {
+            is_synced: true,
+            disk_email,
+            matching_id: store.current.clone(),
+            current_id: store.current.clone(),
+        });
+    }
+
+    // 慢路径：遍历所有账号匹配
     let matching_id = disk_email
         .as_deref()
         .and_then(|email| {
@@ -1092,6 +1248,22 @@ pub fn run() {
                 println!("[Scheduler] 后台刷新未开启，跳过启动");
             }
 
+            // 启动本地代理（仅在设置开启时）
+            let (proxy_enabled, proxy_port) = state
+                .store
+                .lock()
+                .map(|s| (s.settings.proxy_enabled, s.settings.proxy_port))
+                .unwrap_or((false, 18080));
+            if proxy_enabled {
+                let handle =
+                    proxy::start(state.store.clone(), proxy_port, app.handle().clone(), state.proxy_stats.clone(), state.token_tracker.clone());
+                let mut proxy_handle = state.proxy_handle.lock().unwrap();
+                *proxy_handle = Some(handle);
+                println!("[Proxy] 代理已随应用启动 (端口 {})", proxy_port);
+            } else {
+                println!("[Proxy] 本地代理未开启，跳过启动");
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1126,6 +1298,12 @@ pub fn run() {
             reload_ide_windows,
             get_settings,
             update_settings,
+            get_proxy_status,
+            kill_codex_processes,
+            set_proxy_env,
+            get_token_stats,
+            reset_token_stats,
+            show_main_window_cmd,
             check_sync_conflict,
             request_quarantine_fix_ticket,
             fix_codex_quarantine,
