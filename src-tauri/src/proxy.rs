@@ -1,9 +1,10 @@
-//! Codex Switcher - 本地 HTTP 代理服务器
+//! Codex Switcher - 本地 HTTP/WebSocket 代理服务器
 //!
-//! 透明代理：拦截 Codex CLI 请求，动态注入当前账号 Token 并转发到 api.openai.com。
-//! Header 转发逻辑与官方 codex-rs/responses-api-proxy 完全一致，确保请求指纹对齐。
+//! 透明代理：拦截 Codex CLI/App 请求，动态注入当前账号 Token 并转发。
+//! HTTP: Header 转发逻辑与官方 responses-api-proxy 一致
+//! WebSocket: 双向桥接，支持 Codex App 的 WebSocket 通信
 //!
-//! 功能：SSE 流式转发 | 429 自动切号 | 封号检测 | 预防性阈值 | 评分选号 | auth.json 回读
+//! 功能：SSE 流式转发 | WebSocket 透传 | 429 自动切号 | 封号检测 | 评分选号
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -12,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
@@ -24,12 +25,19 @@ use hyper_util::rt::TokioIo;
 use reqwest::Client;
 use tauri::Emitter;
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite;
+use tungstenite::client::IntoClientRequest;
 
 use crate::account::AccountStore;
 use crate::token_tracker::TokenTracker;
 
-const UPSTREAM_HOST: &str = "api.openai.com";
-const UPSTREAM_ORIGIN: &str = "https://api.openai.com";
+/// ChatGPT OAuth 登录用的上游（免费/Plus/Team 账号）
+const CHATGPT_HOST: &str = "chatgpt.com";
+const CHATGPT_ORIGIN: &str = "https://chatgpt.com/backend-api/codex";
+
+/// API key 用的上游
+const API_HOST: &str = "api.openai.com";
+const API_ORIGIN: &str = "https://api.openai.com";
 const MAX_429_RETRIES: usize = 2;
 
 /// 统一的响应 Body 类型：支持 Full（错误/小响应）和 Stream（SSE 流式）
@@ -113,6 +121,7 @@ pub fn start(
                 if let Err(e) = http1::Builder::new()
                     .keep_alive(true)
                     .serve_connection(io, service)
+                    .with_upgrades()
                     .await
                 {
                     if !e.is_incomplete_message() {
@@ -128,11 +137,13 @@ pub fn start(
 // Token 管理
 // ────────────────────────────────────────────────────────────────
 
-/// 获取当前账号最新的 access_token
+/// 获取当前账号最新的 access_token + 认证模式
 ///
 /// 安全策略：不主动刷新 token（避免与 Codex CLI 冲突），
 /// 但每次请求从 auth.json 回读，确保用到 Codex CLI 刷新后的最新值。
-fn get_current_token(state: &ProxyState) -> Result<String, String> {
+///
+/// 返回 (token, is_chatgpt_auth)
+fn get_current_token(state: &ProxyState) -> Result<(String, bool), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     let current_id = store.current.as_ref().ok_or("没有激活的账号")?.clone();
 
@@ -148,8 +159,31 @@ fn get_current_token(state: &ProxyState) -> Result<String, String> {
         .get(&current_id)
         .ok_or("当前账号不存在")?;
 
-    AccountStore::extract_access_token(&account.auth_json)
-        .ok_or_else(|| "当前账号缺少 access_token".to_string())
+    let token = AccountStore::extract_access_token(&account.auth_json)
+        .ok_or_else(|| "当前账号缺少 access_token".to_string())?;
+
+    // 判断认证模式：JWT (eyJ...) = ChatGPT OAuth, sk-... = API key
+    let is_chatgpt = token.starts_with("eyJ");
+
+    Ok((token, is_chatgpt))
+}
+
+/// 根据认证模式获取上游地址
+fn get_upstream(is_chatgpt: bool, path_and_query: &str) -> (String, &'static str) {
+    if is_chatgpt {
+        // 客户端路径: /v1/responses (因为 OPENAI_BASE_URL 带 /v1)
+        // ChatGPT 上游: /backend-api/codex/responses (不含 /v1)
+        // 需要去掉 /v1 前缀
+        let path = path_and_query
+            .strip_prefix("/v1")
+            .unwrap_or(path_and_query);
+        let url = format!("{}{}", CHATGPT_ORIGIN, path);
+        (url, CHATGPT_HOST)
+    } else {
+        // API key: 转发到 api.openai.com + 原始路径（保留 /v1）
+        let url = format!("{}{}", API_ORIGIN, path_and_query);
+        (url, API_HOST)
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -317,20 +351,26 @@ async fn handle_request(
             .unwrap());
     }
 
-    // 1. 获取当前 token（含 auth.json 回读）
-    let token = match get_current_token(&state) {
+    // ── WebSocket 升级检测 ──
+    if is_websocket_upgrade(&req) {
+        println!("[Proxy] WebSocket upgrade 请求: {}", req.uri());
+        return handle_websocket(state, req).await;
+    }
+
+    // 1. 获取当前 token + 认证模式
+    let (token, is_chatgpt) = match get_current_token(&state) {
         Ok(t) => t,
         Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
     };
 
-    // 2. 提取请求元数据
+    // 2. 提取请求元数据 + 根据认证模式路由上游
     let method = req.method().clone();
     let path_and_query = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let upstream_url = format!("{}{}", UPSTREAM_ORIGIN, path_and_query);
+    let (upstream_url, upstream_host) = get_upstream(is_chatgpt, &path_and_query);
 
     // 3. 透明 Header 转发（官方 responses-api-proxy 逻辑）
     let mut base_headers = reqwest::header::HeaderMap::new();
@@ -345,10 +385,9 @@ async fn handle_request(
             }
         }
     }
-    base_headers.insert(
-        reqwest::header::HOST,
-        reqwest::header::HeaderValue::from_static(UPSTREAM_HOST),
-    );
+    if let Ok(host_val) = reqwest::header::HeaderValue::from_str(upstream_host) {
+        base_headers.insert(reqwest::header::HOST, host_val);
+    }
 
     // 4. 读取请求体
     let body_bytes = match req.into_body().collect().await {
@@ -430,7 +469,7 @@ async fn handle_request(
         } else {
             // 其他请求正在切号，短暂等待后用新 token 重试
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if let Ok(new_token) = get_current_token(&state) {
+            if let Ok((new_token, _)) = get_current_token(&state) {
                 if let Ok(retry_resp) = forward_with_token(
                     &state, &method, &upstream_url, &base_headers, &body_bytes, &new_token,
                 )
@@ -585,17 +624,20 @@ fn build_stream_response(
         }
     }
 
-    // 流式传输 + 后台 usage 提取
-    // 每个 chunk 直接转发（零延迟），同时复制到 buffer 用于解析 usage
+    // 流式传输 + usage 提取
+    // 每个 chunk 直接转发，同时复制到 buffer
+    // 流结束时（收到 None）解析 buffer 提取 usage
     let usage_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let buf_clone = usage_buf.clone();
+    let tracker_clone = tracker.clone();
 
     let raw_stream = upstream_resp.bytes_stream();
 
+    // 用 chain 在原始 stream 结束后追加一个"结束信号"
+    // 利用 map + 闭包在最后一个 chunk 后触发 usage 解析
     let stream = raw_stream.map(move |result| {
         match result {
             Ok(bytes) => {
-                // 复制到 usage buffer（不阻塞转发）
                 if let Ok(mut buf) = buf_clone.lock() {
                     buf.extend_from_slice(&bytes);
                 }
@@ -605,31 +647,228 @@ fn build_stream_response(
         }
     });
 
-    // 当 stream 结束后，后台解析 usage
-    if let Some(tracker) = tracker {
-        let buf_for_parse = usage_buf;
-        let model = model_hint;
-        tokio::spawn(async move {
-            // 等一小段时间确保 stream 结束
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Ok(buf) = buf_for_parse.lock() {
-                if let Some(usage) =
-                    crate::token_tracker::extract_usage_from_sse(&buf, &model)
-                {
-                    tracker.record(usage);
+    // 用 chain + once 在流结束后触发解析
+    let buf_for_end = usage_buf;
+    let end_signal = futures_util::stream::once(async move {
+        // 流结束，解析 buffer
+        if let Some(tracker) = tracker_clone {
+            if let Ok(buf) = buf_for_end.lock() {
+                if !buf.is_empty() {
+                    if let Some(usage) =
+                        crate::token_tracker::extract_usage_from_sse(&buf, "")
+                    {
+                        println!(
+                            "[Proxy] Token 统计: input={} output={} total={} model={}",
+                            usage.input_tokens, usage.output_tokens,
+                            usage.total_tokens, usage.model
+                        );
+                        tracker.record(usage);
+                    }
                 }
             }
-        });
-    }
+        }
+        // 不产生数据帧，只是触发解析
+        Err("".to_string()) // 这个 Err 会被 StreamBody 忽略
+    })
+    // 过滤掉这个空 error，不让它传到客户端
+    .filter(|_| futures_util::future::ready(false));
+
+    let combined = stream.chain(end_signal);
 
     builder
-        .body(BodyExt::boxed(StreamBody::new(stream)))
+        .body(BodyExt::boxed(StreamBody::new(combined)))
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "流构建失败"))
 }
 
 /// Full body 包装（用于错误响应等小数据）
 fn full_body(bytes: Bytes) -> ProxyBody {
     Full::new(bytes).map_err(|_| String::new()).boxed()
+}
+
+// ────────────────────────────────────────────────────────────────
+// WebSocket 代理
+// ────────────────────────────────────────────────────────────────
+
+/// 检测是否为 WebSocket 升级请求
+fn is_websocket_upgrade(req: &Request<Incoming>) -> bool {
+    req.headers()
+        .get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_lowercase().contains("websocket"))
+        .unwrap_or(false)
+}
+
+/// 处理 WebSocket 代理：连接上游 + 双向桥接
+async fn handle_websocket(
+    state: Arc<ProxyState>,
+    mut req: Request<Incoming>,
+) -> Result<Response<ProxyBody>, Infallible> {
+    // 1. 获取 token 和上游地址
+    let (token, is_chatgpt) = match get_current_token(&state) {
+        Ok(t) => t,
+        Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
+    };
+
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let (http_url, _upstream_host) = get_upstream(is_chatgpt, &path);
+
+    // http(s):// → ws(s)://
+    let ws_url = http_url
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
+
+    // 2. 构建上游 WebSocket 请求（透明 header 转发 + token 注入）
+    let mut upstream_req: tungstenite::http::Request<()> = match ws_url.as_str().into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("WebSocket 请求构建失败: {}", e),
+            ))
+        }
+    };
+
+    // 转发客户端 header（排除 WebSocket 握手专用 header，由 into_client_request 生成）
+    for (name, value) in req.headers() {
+        let lower = name.as_str().to_lowercase();
+        if matches!(
+            lower.as_str(),
+            "authorization"
+                | "host"
+                | "upgrade"
+                | "connection"
+                | "sec-websocket-key"
+                | "sec-websocket-version"
+                | "sec-websocket-extensions"
+        ) {
+            continue;
+        }
+        upstream_req.headers_mut().insert(name.clone(), value.clone());
+    }
+
+    // 注入 token
+    if let Ok(auth_val) = HeaderValue::from_str(&format!("Bearer {}", token)) {
+        upstream_req
+            .headers_mut()
+            .insert(hyper::header::AUTHORIZATION, auth_val);
+    }
+
+    // 3. 连接上游 WebSocket
+    let (upstream_ws, _upstream_resp) =
+        match tokio_tungstenite::connect_async(upstream_req).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("[Proxy] WebSocket 上游连接失败: {}", e);
+                return Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("WebSocket 上游连接失败: {}", e),
+                ));
+            }
+        };
+
+    println!("[Proxy] WebSocket 上游已连接");
+
+    // 4. 计算 Sec-WebSocket-Accept 回复客户端
+    let ws_key = req
+        .headers()
+        .get("sec-websocket-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let accept_key = tungstenite::handshake::derive_accept_key(ws_key.as_bytes());
+
+    // 5. 提取 hyper upgrade handle（必须在返回 101 之前）
+    let on_upgrade = hyper::upgrade::on(&mut req);
+
+    // 6. 构建 101 Switching Protocols 响应
+    let response = Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Accept", accept_key)
+        .body(full_body(Bytes::new()))
+        .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "101 构建失败"));
+
+    // 7. 后台任务：upgrade 完成后双向桥接
+    tokio::spawn(async move {
+        match on_upgrade.await {
+            Ok(upgraded) => {
+                let io = TokioIo::new(upgraded);
+                let client_ws =
+                    tokio_tungstenite::WebSocketStream::from_raw_socket(
+                        io,
+                        tungstenite::protocol::Role::Server,
+                        None,
+                    )
+                    .await;
+
+                println!("[Proxy] WebSocket 客户端已升级，开始桥接");
+                bridge_websockets(client_ws, upstream_ws).await;
+                println!("[Proxy] WebSocket 连接已关闭");
+            }
+            Err(e) => eprintln!("[Proxy] WebSocket upgrade 失败: {}", e),
+        }
+    });
+
+    Ok(response)
+}
+
+/// 双向桥接两个 WebSocket 连接
+async fn bridge_websockets<S1, S2>(client: S1, upstream: S2)
+where
+    S1: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
+        + futures_util::Sink<tungstenite::Message, Error = tungstenite::Error>
+        + Unpin,
+    S2: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
+        + futures_util::Sink<tungstenite::Message, Error = tungstenite::Error>
+        + Unpin,
+{
+    let (mut client_write, mut client_read) = client.split();
+    let (mut upstream_write, mut upstream_read) = upstream.split();
+
+    let client_to_upstream = async {
+        while let Some(msg) = client_read.next().await {
+            match msg {
+                Ok(msg) => {
+                    if msg.is_close() {
+                        let _ = upstream_write.send(msg).await;
+                        break;
+                    }
+                    if upstream_write.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    let upstream_to_client = async {
+        while let Some(msg) = upstream_read.next().await {
+            match msg {
+                Ok(msg) => {
+                    if msg.is_close() {
+                        let _ = client_write.send(msg).await;
+                        break;
+                    }
+                    if client_write.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = client_to_upstream => {},
+        _ = upstream_to_client => {},
+    }
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {

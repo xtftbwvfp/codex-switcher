@@ -1030,32 +1030,47 @@ fn show_main_window_cmd(app: tauri::AppHandle) {
     crate::tray::show_main_window_from_cmd(&app);
 }
 
-/// 杀死所有 codex 进程（供代理页面使用）
+/// 杀死所有 codex 相关进程（排除 Codex Switcher 自身）
 #[tauri::command]
 fn kill_codex_processes() -> Result<String, String> {
-    let output = std::process::Command::new("pkill")
-        .arg("-9")
-        .arg("-f")
-        .arg("codex")
-        .output()
-        .map_err(|e| format!("执行 pkill 失败: {}", e))?;
+    let script = r#"
+        killed=0
+        for pid in $(pgrep -f codex 2>/dev/null); do
+            cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+            case "$cmd" in
+                *codex-switcher*|*Codex\ Switcher*|*codex_switcher*) continue ;;
+            esac
+            kill -9 "$pid" 2>/dev/null && killed=$((killed+1))
+        done
+        echo "$killed"
+    "#;
 
-    if output.status.success() {
-        Ok("已终止所有 codex 进程".to_string())
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .map_err(|e| format!("执行失败: {}", e))?;
+
+    let count = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let n: i32 = count.parse().unwrap_or(0);
+
+    if n > 0 {
+        Ok(format!("已终止 {} 个 codex 进程", n))
     } else {
         Ok("未找到运行中的 codex 进程".to_string())
     }
 }
 
-/// 写入 shell 配置文件中的 OPENAI_BASE_URL 环境变量
+/// 设置 OPENAI_BASE_URL 环境变量（终端 + GUI 应用全覆盖）
 #[tauri::command]
 fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
     let home = dirs::home_dir().ok_or("无法获取用户目录")?;
-    let env_line = format!("export OPENAI_BASE_URL=http://localhost:{}/v1", port);
+    let env_value = format!("http://localhost:{}/v1", port);
+    let env_line = format!("export OPENAI_BASE_URL={}", env_value);
     let marker = "# codex-switcher-proxy";
+    let mut results = Vec::new();
 
-    // 尝试写入 .zshrc 和 .bashrc
-    let mut updated_files = Vec::new();
+    // ── 1. 终端：写入 .zshrc / .bashrc ──
     for rc_name in &[".zshrc", ".bashrc"] {
         let rc_path = home.join(rc_name);
         if !rc_path.exists() {
@@ -1064,14 +1079,12 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
         let content = std::fs::read_to_string(&rc_path)
             .map_err(|e| format!("读取 {} 失败: {}", rc_name, e))?;
 
-        // 移除旧的代理配置行
         let cleaned: Vec<&str> = content
             .lines()
             .filter(|line| !line.contains(marker))
             .collect();
         let mut new_content = cleaned.join("\n");
 
-        // 如果启用，追加新行
         if enable {
             if !new_content.ends_with('\n') {
                 new_content.push('\n');
@@ -1081,15 +1094,31 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
 
         std::fs::write(&rc_path, &new_content)
             .map_err(|e| format!("写入 {} 失败: {}", rc_name, e))?;
-        updated_files.push(rc_name.to_string());
+        results.push(rc_name.to_string());
     }
 
-    if updated_files.is_empty() {
-        return Err("未找到 .zshrc 或 .bashrc 文件".to_string());
+    // GUI 应用：launchctl setenv（Codex App 重启后生效）
+    #[cfg(target_os = "macos")]
+    {
+        if enable {
+            let _ = std::process::Command::new("launchctl")
+                .args(["setenv", "OPENAI_BASE_URL", &env_value])
+                .output();
+            results.push("launchctl".to_string());
+        } else {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unsetenv", "OPENAI_BASE_URL"])
+                .output();
+            results.push("launchctl".to_string());
+        }
     }
 
-    let status = if enable { "已写入" } else { "已移除" };
-    Ok(format!("{} 环境变量 ({})", status, updated_files.join(", ")))
+    let status = if enable { "已设置" } else { "已移除" };
+    Ok(format!(
+        "{} OPENAI_BASE_URL ({})。\n终端：新窗口生效\nCodex App：重启后生效",
+        status,
+        results.join(", ")
+    ))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -38,19 +38,21 @@ pub fn detect_running_ides() -> Vec<String> {
 
 /// 重载指定 IDE
 pub fn reload_ide(name: &str, use_window_reload: bool) -> Result<(), String> {
-    // 根据用户要求，切换账号后直接强杀所有的 codex 进程
-    // 这会让各个 IDE 中的 Codex 插件/服务器立刻死掉，随后 IDE 会自动将其重启，从而加载到最新的 token。
-    let output = Command::new("pkill")
-        .arg("-9")
-        .arg("-f")
-        .arg("codex")
-        .output();
+    // 杀死所有 codex 进程（排除 Codex Switcher 自身）
+    let script = r#"
+        for pid in $(pgrep -f codex 2>/dev/null); do
+            cmd=$(ps -p "$pid" -o command= 2>/dev/null || true)
+            case "$cmd" in
+                *codex-switcher*|*Codex\ Switcher*|*codex_switcher*) continue ;;
+            esac
+            kill -9 "$pid" 2>/dev/null
+        done
+    "#;
+    let output = Command::new("sh").arg("-c").arg(script).output();
 
     if let Ok(o) = output {
         if o.status.success() {
-            println!("成功通过 pkill -9 -f codex 杀死了进程");
-        } else {
-            println!("pkill 未找到匹配的 codex 进程或执行失败");
+            println!("已杀死所有 codex 进程");
         }
     }
 

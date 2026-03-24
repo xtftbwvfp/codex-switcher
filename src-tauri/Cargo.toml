@@ -29,6 +29,7 @@ hyper-util = { version = "0.1", features = ["tokio", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
 url = "2"
 base64 = "0.22.1"
 rand = "0.9.2"
