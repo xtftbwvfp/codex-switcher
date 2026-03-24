@@ -1140,16 +1140,16 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
                         new_content.push('\n');
                     }
                     new_content.push_str(&format!(
-                        "\n[model_providers.openai] {}\nbase_url = \"{}\" {}\n",
-                        config_marker, env_value, config_marker
+                        "\n[model_providers.openai] {}\nname = \"OpenAI\" {}\nbase_url = \"{}\" {}\n",
+                        config_marker, config_marker, env_value, config_marker
                     ));
                 } else {
-                    // 在 [model_providers.openai] 段后插入 base_url
+                    // 在 [model_providers.openai] 段后插入 name + base_url
                     new_content = new_content.replace(
                         "[model_providers.openai]",
                         &format!(
-                            "[model_providers.openai]\nbase_url = \"{}\" {}",
-                            env_value, config_marker
+                            "[model_providers.openai]\nname = \"OpenAI\" {}\nbase_url = \"{}\" {}",
+                            config_marker, env_value, config_marker
                         ),
                     );
                 }
