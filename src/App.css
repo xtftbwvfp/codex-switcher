@@ -161,11 +161,67 @@ body {
   border-bottom: 1px solid var(--border-color);
 }
 
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--primary-color), var(--purple-color));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  flex-shrink: 0;
+}
+
 .header-left h1 {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
   color: var(--text-primary);
+}
+
+.proxy-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.proxy-indicator.on {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--success-color);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.proxy-indicator.off {
+  background: rgba(156, 163, 175, 0.1);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+.proxy-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.proxy-indicator.on .proxy-dot {
+  background: var(--success-color);
+  box-shadow: 0 0 4px var(--success-color);
+}
+
+.proxy-indicator.off .proxy-dot {
+  background: var(--text-muted);
 }
 
 .header-actions {

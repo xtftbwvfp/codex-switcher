@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Zap } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { writeTextFile, readTextFile } from '@tauri-apps/plugin-fs';
@@ -62,6 +63,14 @@ function App() {
   const [pendingSwitchId, setPendingSwitchId] = useState<string | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
   const [syncStatus, setSyncStatus] = useState<any>(null);
+  const [proxyRunning, setProxyRunning] = useState(false);
+
+  const checkProxyStatus = async () => {
+    try {
+      const s = await invoke<{ is_running: boolean }>('get_proxy_status');
+      setProxyRunning(s.is_running);
+    } catch { setProxyRunning(false); }
+  };
 
   const checkSyncStatus = async () => {
     try {
@@ -74,6 +83,7 @@ function App() {
 
   useEffect(() => {
     checkSyncStatus();
+    checkProxyStatus();
   }, []);
 
   const currentAccount = accounts.find(a => a.id === currentId) || null;
@@ -125,6 +135,7 @@ function App() {
     const unlisten = listen('settings-updated', () => {
       console.log('[Frontend] 收到设置更新通知，重新加载设置');
       refresh();
+      checkProxyStatus();
     });
 
     return () => {
@@ -273,7 +284,14 @@ function App() {
       {/* 顶部标题栏 */}
       <header className="app-header">
         <div className="header-left">
+          <div className="app-logo">
+            <Zap size={18} />
+          </div>
           <h1>Codex Switcher</h1>
+          <div className={`proxy-indicator ${proxyRunning ? 'on' : 'off'}`} title={proxyRunning ? '代理运行中' : '代理未启动'}>
+            <span className="proxy-dot" />
+            {proxyRunning ? 'Proxy ON' : 'Proxy OFF'}
+          </div>
         </div>
 
         {/* 导航菜单 */}
