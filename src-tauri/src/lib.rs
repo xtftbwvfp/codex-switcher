@@ -8,6 +8,7 @@ mod oauth;
 mod oauth_server;
 mod proxy;
 mod refresh_lock;
+mod switch_log;
 mod token_tracker;
 mod scheduler;
 mod tray;
@@ -68,6 +69,7 @@ pub struct AppState {
     pub token_tracker: std::sync::Arc<token_tracker::TokenTracker>,
     /// 切号时通知所有 WebSocket 连接断开重连
     pub ws_disconnect: std::sync::Arc<tokio::sync::Notify>,
+    pub switch_logger: std::sync::Arc<switch_log::SwitchLogger>,
     pub refresh_locks: RefreshLockManager,
     quarantine_fix_ticket: std::sync::Mutex<Option<QuarantineFixTicket>>,
 }
@@ -81,6 +83,7 @@ impl AppState {
             proxy_stats: std::sync::Arc::new(proxy::ProxyStats::default()),
             token_tracker: token_tracker::TokenTracker::new(),
             ws_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
+            switch_logger: switch_log::SwitchLogger::new(),
             refresh_locks: RefreshLockManager::default(),
             quarantine_fix_ticket: std::sync::Mutex::new(None),
         }
@@ -223,6 +226,7 @@ fn update_settings(
                     state.proxy_stats.clone(),
                     state.token_tracker.clone(),
                     state.ws_disconnect.clone(),
+                    state.switch_logger.clone(),
                 );
                 *proxy_handle = Some(handle);
                 println!("[Proxy] 代理已启动 (端口 {})", settings.proxy_port);
@@ -571,6 +575,23 @@ async fn switch_account(
     state.refresh_locks.release(&target_id).await;
     switch_result?;
     println!("[Switch] 切换完成！");
+
+    // 记录切号日志
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let from_name = store.accounts.values()
+            .find(|a| Some(&a.id) != store.current.as_ref() && a.last_used.is_some())
+            .map(|a| a.name.clone());
+        let to_name = store.accounts.get(&target_id).map(|a| a.name.clone()).unwrap_or_default();
+        let to_quota = store.accounts.get(&target_id).and_then(|a| a.cached_quota.as_ref()).map(|q| q.five_hour_left);
+        state.switch_logger.log_switch(
+            from_name,
+            to_name,
+            switch_log::SwitchReason::Manual,
+            None,
+            to_quota,
+        );
+    }
 
     // 断开所有代理 WebSocket 连接，强制 Codex App 重连使用新 token
     state.ws_disconnect.notify_waiters();
@@ -1033,6 +1054,24 @@ fn reset_token_stats(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// 获取 Token 使用历史（趋势图数据）
+#[tauri::command]
+fn get_token_history(days: u32) -> Result<Vec<token_tracker::TokenHistoryEntry>, String> {
+    Ok(token_tracker::TokenTracker::get_history(days))
+}
+
+/// 获取切号历史
+#[tauri::command]
+fn get_switch_history(state: State<AppState>, days: u32) -> Result<Vec<switch_log::SwitchEvent>, String> {
+    Ok(state.switch_logger.get_history(days))
+}
+
+/// 获取切号统计
+#[tauri::command]
+fn get_switch_stats(state: State<AppState>) -> Result<switch_log::SwitchStats, String> {
+    Ok(state.switch_logger.get_stats())
+}
+
 /// 显示主窗口（供 tray popup 调用）
 #[tauri::command]
 fn show_main_window_cmd(app: tauri::AppHandle) {
@@ -1369,7 +1408,7 @@ pub fn run() {
                 .unwrap_or((false, 18080));
             if proxy_enabled {
                 let handle =
-                    proxy::start(state.store.clone(), proxy_port, app.handle().clone(), state.proxy_stats.clone(), state.token_tracker.clone(), state.ws_disconnect.clone());
+                    proxy::start(state.store.clone(), proxy_port, app.handle().clone(), state.proxy_stats.clone(), state.token_tracker.clone(), state.ws_disconnect.clone(), state.switch_logger.clone());
                 let mut proxy_handle = state.proxy_handle.lock().unwrap();
                 *proxy_handle = Some(handle);
                 println!("[Proxy] 代理已随应用启动 (端口 {})", proxy_port);
@@ -1419,6 +1458,9 @@ pub fn run() {
             show_main_window_cmd,
             set_codex_fast_mode,
             get_codex_fast_mode,
+            get_token_history,
+            get_switch_history,
+            get_switch_stats,
             check_sync_conflict,
             request_quarantine_fix_ticket,
             fix_codex_quarantine,

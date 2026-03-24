@@ -58,6 +58,16 @@ fn get_pricing(model: &str) -> ModelPricing {
     }
 }
 
+/// 时间点记录（用于趋势图）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenHistoryEntry {
+    pub timestamp: DateTime<Utc>,
+    pub model: String,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost: f64,
+}
+
 /// 单次请求的 usage 数据
 #[derive(Debug, Clone)]
 pub struct RequestUsage {
@@ -161,14 +171,40 @@ impl TokenTracker {
             model_entry.output_tokens += usage.output_tokens;
             model_entry.cost_usd += cost;
 
-            // 持久化
+            // 持久化累计值
             Self::save_to_disk(&stats);
         }
+
+        // 追加时间点记录（用于趋势图）
+        let entry = TokenHistoryEntry {
+            timestamp: Utc::now(),
+            model: usage.model,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cost,
+        };
+        Self::append_history(&entry);
     }
 
     /// 获取当前统计快照
     pub fn get_stats(&self) -> UsageStats {
         self.stats.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// 获取最近 N 天的时间点记录
+    pub fn get_history(days: u32) -> Vec<TokenHistoryEntry> {
+        let path = Self::history_path();
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let cutoff = Utc::now() - chrono::Duration::days(days as i64);
+        content
+            .lines()
+            .filter_map(|line| serde_json::from_str::<TokenHistoryEntry>(line).ok())
+            .filter(|e| e.timestamp > cutoff)
+            .collect()
     }
 
     /// 重置统计
@@ -179,6 +215,27 @@ impl TokenTracker {
             stats.last_month_cost = Some(old.total_cost_usd);
             stats.last_month_tokens = Some(old.total_tokens);
             Self::save_to_disk(&stats);
+        }
+    }
+
+    fn history_path() -> PathBuf {
+        dirs::home_dir()
+            .expect("home dir")
+            .join(".codex-switcher")
+            .join("token-history.jsonl")
+    }
+
+    fn append_history(entry: &TokenHistoryEntry) {
+        let path = Self::history_path();
+        if let Ok(json) = serde_json::to_string(entry) {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                let _ = writeln!(file, "{}", json);
+            }
         }
     }
 

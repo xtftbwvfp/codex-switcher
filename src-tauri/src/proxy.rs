@@ -29,6 +29,7 @@ use tokio_tungstenite::tungstenite;
 use tungstenite::client::IntoClientRequest;
 
 use crate::account::AccountStore;
+use crate::switch_log::{SwitchLogger, SwitchReason};
 use crate::token_tracker::TokenTracker;
 
 /// ChatGPT OAuth 登录用的上游（免费/Plus/Team 账号）
@@ -68,6 +69,7 @@ struct ProxyState {
     tracker: Arc<TokenTracker>,
     /// 切号时通知 WebSocket 断开
     ws_disconnect: Arc<tokio::sync::Notify>,
+    switch_logger: Arc<SwitchLogger>,
 }
 
 /// 启动代理服务器
@@ -78,6 +80,7 @@ pub fn start(
     stats: Arc<ProxyStats>,
     tracker: Arc<TokenTracker>,
     ws_disconnect: Arc<tokio::sync::Notify>,
+    switch_logger: Arc<SwitchLogger>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -103,6 +106,7 @@ pub fn start(
             stats,
             tracker,
             ws_disconnect,
+            switch_logger,
         });
 
         loop {
@@ -310,21 +314,32 @@ fn mark_current_quota_depleted(state: &ProxyState) {
     }
 }
 
-fn do_switch(state: &ProxyState, new_id: &str) -> Result<(), String> {
+fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
+
+    // 记录切号前的账号信息
+    let from_name = store.current.as_ref().and_then(|id| store.accounts.get(id)).map(|a| a.name.clone());
+    let from_quota = store.current.as_ref()
+        .and_then(|id| store.accounts.get(id))
+        .and_then(|a| a.cached_quota.as_ref())
+        .map(|q| q.five_hour_left);
+
     store.switch_to(new_id)?;
     store.save()?;
 
-    let name = store
-        .accounts
-        .get(new_id)
-        .map(|a| a.name.clone())
-        .unwrap_or_default();
-    println!("[Proxy] 自动切号 → {}", name);
+    let to_name = store.accounts.get(new_id).map(|a| a.name.clone()).unwrap_or_default();
+    let to_quota = store.accounts.get(new_id)
+        .and_then(|a| a.cached_quota.as_ref())
+        .map(|q| q.five_hour_left);
+
+    println!("[Proxy] 自动切号 → {} ({})", to_name, reason);
+
+    // 记录切号日志
+    state.switch_logger.log_switch(from_name, to_name.clone(), reason, from_quota, to_quota);
 
     state.stats.auto_switches.fetch_add(1, Ordering::Relaxed);
-    state.ws_disconnect.notify_waiters(); // 断开 WebSocket 让 Codex App 重连
-    let _ = state.app_handle.emit("proxy-account-switched", &name);
+    state.ws_disconnect.notify_waiters();
+    let _ = state.app_handle.emit("proxy-account-switched", &to_name);
     let _ = state.app_handle.emit("accounts-updated", ());
 
     Ok(())
@@ -507,7 +522,7 @@ async fn handle_request(
                 .is_ok()
             {
                 if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                    let _ = do_switch(&state_clone, &id);
+                    let _ = do_switch(&state_clone, &id, SwitchReason::QuotaThreshold);
                 }
                 state_clone.switching.store(false, Ordering::SeqCst);
             }
@@ -528,7 +543,7 @@ async fn try_switch_and_retry(
     for attempt in 0..MAX_429_RETRIES {
         match pick_next_account(state) {
             PickResult::Found { id, token } => {
-                if let Err(e) = do_switch(state, &id) {
+                if let Err(e) = do_switch(state, &id, SwitchReason::Http429) {
                     eprintln!("[Proxy] 切号失败: {}", e);
                     continue;
                 }
@@ -740,7 +755,7 @@ async fn handle_websocket(
         if should_switch {
             println!("[Proxy] WebSocket 预检：当前账号无额度，尝试切号...");
             if let PickResult::Found { id, token: new_token } = pick_next_account(&state) {
-                if do_switch(&state, &id).is_ok() {
+                if do_switch(&state, &id, SwitchReason::WebSocketPrecheck).is_ok() {
                     is_chatgpt = new_token.starts_with("eyJ");
                     token = new_token;
                     println!("[Proxy] WebSocket 预检切号成功");
@@ -976,7 +991,7 @@ where
                         mark_current_quota_depleted(&state_clone);
                         let _ = client_write.send(msg).await;
                         if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                            let _ = do_switch(&state_clone, &id);
+                            let _ = do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
                         }
                         break;
                     }
@@ -986,7 +1001,7 @@ where
                         mark_current_banned(&state_clone);
                         let _ = client_write.send(msg).await;
                         if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                            let _ = do_switch(&state_clone, &id);
+                            let _ = do_switch(&state_clone, &id, SwitchReason::BannedDetected);
                         }
                         break;
                     }

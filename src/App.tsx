@@ -10,10 +10,11 @@ import { Dashboard } from './components/Dashboard';
 import { AccountList } from './components/AccountList';
 import { Settings } from './components/Settings';
 import { Proxy } from './components/Proxy';
+import { Stats } from './components/Stats';
 import { ConfirmModal } from './components/ConfirmModal';
 import './App.css';
 
-type PageType = 'dashboard' | 'accounts' | 'proxy' | 'settings';
+type PageType = 'dashboard' | 'accounts' | 'proxy' | 'stats' | 'settings';
 
 function App() {
   const {
@@ -296,6 +297,12 @@ function App() {
             代理
           </button>
           <button
+            className={`nav-item ${currentPage === 'stats' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('stats')}
+          >
+            统计
+          </button>
+          <button
             className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
             onClick={() => setCurrentPage('settings')}
           >
@@ -376,6 +383,8 @@ function App() {
           />
         ) : currentPage === 'proxy' ? (
           <Proxy />
+        ) : currentPage === 'stats' ? (
+          <Stats />
         ) : (
           <Settings />
         )}

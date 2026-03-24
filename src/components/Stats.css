@@ -1,0 +1,210 @@
+.stats-page {
+    padding: 24px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.stats-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.stats-header h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+/* 时间范围按钮 */
+.time-range-btns {
+    display: flex;
+    gap: 4px;
+    background: var(--section-bg);
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.range-btn {
+    padding: 6px 16px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.15s;
+}
+
+.range-btn.active {
+    background: var(--primary-color);
+    color: white;
+}
+
+.range-btn:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+/* 摘要卡片 */
+.stats-cards {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.stat-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+}
+
+.stat-card-value {
+    font-size: 1.6rem;
+    font-weight: 800;
+    line-height: 1.2;
+    margin-bottom: 4px;
+}
+
+.stat-card-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stat-card.purple .stat-card-value { color: #8b5cf6; }
+.stat-card.yellow .stat-card-value { color: #fbbf24; }
+.stat-card.green .stat-card-value { color: #10b981; }
+.stat-card.blue .stat-card-value { color: #3b82f6; }
+
+/* 统计区块 */
+.stats-section {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.stats-section h3 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+/* 双列布局 */
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+/* recharts 文字颜色 */
+.stats-section .recharts-text {
+    fill: var(--text-muted) !important;
+}
+
+.stats-section .recharts-legend-item-text {
+    color: var(--text-secondary) !important;
+    font-size: 12px !important;
+}
+
+/* 切号日志表格 */
+.switch-log-table {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.log-header {
+    display: grid;
+    grid-template-columns: 140px 1fr 90px 80px;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border-color);
+    position: sticky;
+    top: 0;
+    background: var(--card-bg);
+}
+
+.log-row {
+    display: grid;
+    grid-template-columns: 140px 1fr 90px 80px;
+    gap: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+    transition: background 0.1s;
+}
+
+.log-row:hover {
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.log-time {
+    color: var(--text-muted);
+    font-family: 'SF Mono', monospace;
+    font-size: 11px;
+}
+
+.log-path {
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.log-reason {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-align: center;
+}
+
+.log-reason.manual {
+    background: rgba(59, 130, 246, 0.15);
+    color: #3b82f6;
+}
+
+.log-reason.ratelimit {
+    background: rgba(245, 158, 11, 0.15);
+    color: #f59e0b;
+}
+
+.log-reason.banned {
+    background: rgba(239, 68, 68, 0.15);
+    color: #ef4444;
+}
+
+.log-reason.auto {
+    background: rgba(16, 185, 129, 0.15);
+    color: #10b981;
+}
+
+.log-duration {
+    color: var(--text-muted);
+    text-align: right;
+    font-family: 'SF Mono', monospace;
+    font-size: 11px;
+}
+
+.log-empty {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 24px;
+    font-size: 13px;
+}
