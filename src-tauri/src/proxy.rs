@@ -66,6 +66,8 @@ struct ProxyState {
     switching: AtomicBool,
     stats: Arc<ProxyStats>,
     tracker: Arc<TokenTracker>,
+    /// 切号时通知 WebSocket 断开
+    ws_disconnect: Arc<tokio::sync::Notify>,
 }
 
 /// 启动代理服务器
@@ -75,6 +77,7 @@ pub fn start(
     app_handle: tauri::AppHandle,
     stats: Arc<ProxyStats>,
     tracker: Arc<TokenTracker>,
+    ws_disconnect: Arc<tokio::sync::Notify>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -99,6 +102,7 @@ pub fn start(
             switching: AtomicBool::new(false),
             stats,
             tracker,
+            ws_disconnect,
         });
 
         loop {
@@ -319,6 +323,7 @@ fn do_switch(state: &ProxyState, new_id: &str) -> Result<(), String> {
     println!("[Proxy] 自动切号 → {}", name);
 
     state.stats.auto_switches.fetch_add(1, Ordering::Relaxed);
+    state.ws_disconnect.notify_waiters(); // 断开 WebSocket 让 Codex App 重连
     let _ = state.app_handle.emit("proxy-account-switched", &name);
     let _ = state.app_handle.emit("accounts-updated", ());
 
@@ -704,10 +709,45 @@ async fn handle_websocket(
     mut req: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     // 1. 获取 token 和上游地址
-    let (token, is_chatgpt) = match get_current_token(&state) {
+    let (mut token, mut is_chatgpt) = match get_current_token(&state) {
         Ok(t) => t,
         Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
     };
+
+    // 预检：如果当前账号没额度，先切号再连接
+    {
+        let should_switch = {
+            let store = match state.store.lock() {
+                Ok(s) => s,
+                Err(_) => return Ok(error_response(StatusCode::INTERNAL_SERVER_ERROR, "锁失败")),
+            };
+            if let Some(current_id) = &store.current {
+                store.accounts.get(current_id).and_then(|a| {
+                    a.cached_quota.as_ref().map(|q| {
+                        let is_free = q.plan_type.to_lowercase() == "free";
+                        if is_free {
+                            q.five_hour_left <= 0.0
+                        } else {
+                            q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
+                        }
+                    })
+                }).unwrap_or(false)
+            } else {
+                false
+            }
+        };
+
+        if should_switch {
+            println!("[Proxy] WebSocket 预检：当前账号无额度，尝试切号...");
+            if let PickResult::Found { id, token: new_token } = pick_next_account(&state) {
+                if do_switch(&state, &id).is_ok() {
+                    is_chatgpt = new_token.starts_with("eyJ");
+                    token = new_token;
+                    println!("[Proxy] WebSocket 预检切号成功");
+                }
+            }
+        }
+    }
 
     let path = req
         .uri()
@@ -795,6 +835,7 @@ async fn handle_websocket(
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "101 构建失败"));
 
     // 7. 后台任务：upgrade 完成后双向桥接
+    let disconnect = state.ws_disconnect.clone();
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(upgraded) => {
@@ -808,7 +849,7 @@ async fn handle_websocket(
                     .await;
 
                 println!("[Proxy] WebSocket 客户端已升级，开始桥接");
-                bridge_websockets(client_ws, upstream_ws).await;
+                bridge_websockets(client_ws, upstream_ws, disconnect, state).await;
                 println!("[Proxy] WebSocket 连接已关闭");
             }
             Err(e) => eprintln!("[Proxy] WebSocket upgrade 失败: {}", e),
@@ -818,8 +859,39 @@ async fn handle_websocket(
     Ok(response)
 }
 
+/// 检测 WebSocket 消息是否包含限额/封号错误
+fn detect_ws_rate_limit(msg: &tungstenite::Message) -> bool {
+    if let tungstenite::Message::Text(text) = msg {
+        let lower = text.to_lowercase();
+        lower.contains("rate_limit")
+            || lower.contains("usage_limit")
+            || lower.contains("hit your usage limit")
+            || lower.contains("too many requests")
+    } else {
+        false
+    }
+}
+
+fn detect_ws_banned(msg: &tungstenite::Message) -> bool {
+    if let tungstenite::Message::Text(text) = msg {
+        let lower = text.to_lowercase();
+        lower.contains("deactivated")
+            || lower.contains("banned")
+            || lower.contains("suspended")
+    } else {
+        false
+    }
+}
+
 /// 双向桥接两个 WebSocket 连接
-async fn bridge_websockets<S1, S2>(client: S1, upstream: S2)
+/// - 切号信号 → 断开连接
+/// - 检测到限额/封号消息 → 断开连接（代理会在下次连接时预检切号）
+async fn bridge_websockets<S1, S2>(
+    client: S1,
+    upstream: S2,
+    disconnect: Arc<tokio::sync::Notify>,
+    state: Arc<ProxyState>,
+)
 where
     S1: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
         + futures_util::Sink<tungstenite::Message, Error = tungstenite::Error>
@@ -848,10 +920,34 @@ where
         }
     };
 
+    let state_clone = state.clone();
     let upstream_to_client = async {
         while let Some(msg) = upstream_read.next().await {
             match msg {
                 Ok(msg) => {
+                    // 检测限额错误
+                    if detect_ws_rate_limit(&msg) {
+                        println!("[Proxy] WebSocket 检测到限额错误，标记并触发切号...");
+                        mark_current_quota_depleted(&state_clone);
+                        // 先把错误消息转发给客户端
+                        let _ = client_write.send(msg).await;
+                        // 然后尝试切号（下次重连会用新号）
+                        if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
+                            let _ = do_switch(&state_clone, &id);
+                        }
+                        break;
+                    }
+                    // 检测封号
+                    if detect_ws_banned(&msg) {
+                        println!("[Proxy] WebSocket 检测到封号，标记并切号...");
+                        mark_current_banned(&state_clone);
+                        let _ = client_write.send(msg).await;
+                        if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
+                            let _ = do_switch(&state_clone, &id);
+                        }
+                        break;
+                    }
+
                     if msg.is_close() {
                         let _ = client_write.send(msg).await;
                         break;
@@ -868,6 +964,9 @@ where
     tokio::select! {
         _ = client_to_upstream => {},
         _ = upstream_to_client => {},
+        _ = disconnect.notified() => {
+            println!("[Proxy] 账号已切换，断开 WebSocket 连接（Codex App 将自动重连）");
+        },
     }
 }
 

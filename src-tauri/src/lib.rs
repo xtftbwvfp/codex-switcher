@@ -66,6 +66,8 @@ pub struct AppState {
     pub proxy_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub proxy_stats: std::sync::Arc<proxy::ProxyStats>,
     pub token_tracker: std::sync::Arc<token_tracker::TokenTracker>,
+    /// 切号时通知所有 WebSocket 连接断开重连
+    pub ws_disconnect: std::sync::Arc<tokio::sync::Notify>,
     pub refresh_locks: RefreshLockManager,
     quarantine_fix_ticket: std::sync::Mutex<Option<QuarantineFixTicket>>,
 }
@@ -78,6 +80,7 @@ impl AppState {
             proxy_handle: std::sync::Mutex::new(None),
             proxy_stats: std::sync::Arc::new(proxy::ProxyStats::default()),
             token_tracker: token_tracker::TokenTracker::new(),
+            ws_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
             refresh_locks: RefreshLockManager::default(),
             quarantine_fix_ticket: std::sync::Mutex::new(None),
         }
@@ -219,6 +222,7 @@ fn update_settings(
                     app.clone(),
                     state.proxy_stats.clone(),
                     state.token_tracker.clone(),
+                    state.ws_disconnect.clone(),
                 );
                 *proxy_handle = Some(handle);
                 println!("[Proxy] 代理已启动 (端口 {})", settings.proxy_port);
@@ -567,6 +571,11 @@ async fn switch_account(
     state.refresh_locks.release(&target_id).await;
     switch_result?;
     println!("[Switch] 切换完成！");
+
+    // 断开所有代理 WebSocket 连接，强制 Codex App 重连使用新 token
+    state.ws_disconnect.notify_waiters();
+    println!("[Switch] 已通知代理断开 WebSocket 连接");
+
     // 联动刷新托盘菜单
     crate::tray::update_tray_menu(&app);
     Ok(())
@@ -1285,7 +1294,7 @@ pub fn run() {
                 .unwrap_or((false, 18080));
             if proxy_enabled {
                 let handle =
-                    proxy::start(state.store.clone(), proxy_port, app.handle().clone(), state.proxy_stats.clone(), state.token_tracker.clone());
+                    proxy::start(state.store.clone(), proxy_port, app.handle().clone(), state.proxy_stats.clone(), state.token_tracker.clone(), state.ws_disconnect.clone());
                 let mut proxy_handle = state.proxy_handle.lock().unwrap();
                 *proxy_handle = Some(handle);
                 println!("[Proxy] 代理已随应用启动 (端口 {})", proxy_port);
