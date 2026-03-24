@@ -798,7 +798,7 @@ async fn handle_websocket(
     }
 
     // 3. 连接上游 WebSocket
-    let (upstream_ws, _upstream_resp) =
+    let (upstream_ws, upstream_handshake_resp) =
         match tokio_tungstenite::connect_async(upstream_req).await {
             Ok(conn) => conn,
             Err(e) => {
@@ -825,12 +825,29 @@ async fn handle_websocket(
     // 5. 提取 hyper upgrade handle（必须在返回 101 之前）
     let on_upgrade = hyper::upgrade::on(&mut req);
 
-    // 6. 构建 101 Switching Protocols 响应
-    let response = Response::builder()
+    // 6. 构建 101 响应，转发上游的响应 header（x-codex-turn-state 等）
+    let mut response_builder = Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header("Upgrade", "websocket")
         .header("Connection", "Upgrade")
-        .header("Sec-WebSocket-Accept", accept_key)
+        .header("Sec-WebSocket-Accept", &accept_key);
+
+    // 转发上游响应 header（排除 WebSocket 握手 header）
+    for (name, value) in upstream_handshake_resp.headers() {
+        let lower = name.as_str().to_lowercase();
+        if matches!(
+            lower.as_str(),
+            "upgrade" | "connection" | "sec-websocket-accept" | "sec-websocket-extensions"
+                | "content-length" | "transfer-encoding"
+        ) {
+            continue;
+        }
+        if let Ok(hn) = HeaderName::from_bytes(name.as_str().as_bytes()) {
+            response_builder = response_builder.header(hn, value.clone());
+        }
+    }
+
+    let response = response_builder
         .body(full_body(Bytes::new()))
         .unwrap_or_else(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "101 构建失败"));
 
@@ -859,28 +876,56 @@ async fn handle_websocket(
     Ok(response)
 }
 
-/// 检测 WebSocket 消息是否包含限额/封号错误
+/// 检测 WebSocket 消息是否为限额错误
+/// 只匹配 response.failed 类型的错误消息，避免误判正常消息中的 rate_limit 字段
 fn detect_ws_rate_limit(msg: &tungstenite::Message) -> bool {
-    if let tungstenite::Message::Text(text) = msg {
-        let lower = text.to_lowercase();
-        lower.contains("rate_limit")
-            || lower.contains("usage_limit")
-            || lower.contains("hit your usage limit")
-            || lower.contains("too many requests")
-    } else {
-        false
+    if let tungstenite::Message::Text(ref text) = msg {
+        // 必须是错误类型的消息
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+            let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            // 只在 response.failed 或 error 类型中检测
+            if msg_type == "response.failed" || msg_type == "error" {
+                let error_code = val
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("code"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                let error_msg = val
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("");
+                return error_code == "rate_limit_exceeded"
+                    || error_msg.contains("hit your usage limit")
+                    || error_msg.contains("usage limit");
+            }
+        }
     }
+    false
 }
 
+/// 检测 WebSocket 消息是否为封号错误
 fn detect_ws_banned(msg: &tungstenite::Message) -> bool {
-    if let tungstenite::Message::Text(text) = msg {
-        let lower = text.to_lowercase();
-        lower.contains("deactivated")
-            || lower.contains("banned")
-            || lower.contains("suspended")
-    } else {
-        false
+    if let tungstenite::Message::Text(ref text) = msg {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+            let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if msg_type == "response.failed" || msg_type == "error" {
+                let error_msg = val
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                return error_msg.contains("deactivated")
+                    || error_msg.contains("banned")
+                    || error_msg.contains("suspended");
+            }
+        }
     }
+    false
 }
 
 /// 双向桥接两个 WebSocket 连接
@@ -925,13 +970,11 @@ where
         while let Some(msg) = upstream_read.next().await {
             match msg {
                 Ok(msg) => {
-                    // 检测限额错误
+                    // 检测限额错误（仅解析 response.failed 类型）
                     if detect_ws_rate_limit(&msg) {
-                        println!("[Proxy] WebSocket 检测到限额错误，标记并触发切号...");
+                        println!("[Proxy] WebSocket 检测到限额错误（response.failed），触发切号...");
                         mark_current_quota_depleted(&state_clone);
-                        // 先把错误消息转发给客户端
                         let _ = client_write.send(msg).await;
-                        // 然后尝试切号（下次重连会用新号）
                         if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
                             let _ = do_switch(&state_clone, &id);
                         }
@@ -939,7 +982,7 @@ where
                     }
                     // 检测封号
                     if detect_ws_banned(&msg) {
-                        println!("[Proxy] WebSocket 检测到封号，标记并切号...");
+                        println!("[Proxy] WebSocket 检测到封号（response.failed），触发切号...");
                         mark_current_banned(&state_clone);
                         let _ = client_write.send(msg).await;
                         if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
