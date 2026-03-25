@@ -620,7 +620,7 @@ pub fn score_candidate_accounts(
         }
 
         let score = match &account.cached_quota {
-            None => 50.0, // 无缓存 → 不确定，给中等分数，有缓存的优先
+            None => 50.0,
             Some(q) => {
                 let plan = q.plan_type.to_lowercase();
                 let is_free = plan == "free" || plan == "unknown";
@@ -629,8 +629,17 @@ pub fn score_candidate_accounts(
                     continue;
                 }
 
+                // Plan 优先级加分：pro/team > plus > free
+                let plan_bonus = match plan.as_str() {
+                    "team" | "enterprise" => 30.0,
+                    "pro" => 25.0,
+                    "plus" => 20.0,
+                    "edu" | "business" => 15.0,
+                    "free" | "unknown" => 0.0,
+                    _ => 10.0,
+                };
+
                 // 5h 可用度
-                // reset_at 过期给 50 分（可能恢复但不确定），有额度的号优先
                 let five_h = if q.five_hour_left <= 0.0 {
                     match q.five_hour_reset_at {
                         Some(reset_at) if now >= reset_at => 50.0,
@@ -654,7 +663,8 @@ pub fn score_candidate_accounts(
                 if effective <= 0.0 {
                     continue;
                 }
-                effective
+                // 最终评分 = 额度分 + Plan 加分
+                effective + plan_bonus
             }
         };
 
