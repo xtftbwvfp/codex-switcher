@@ -629,11 +629,10 @@ pub fn score_candidate_accounts(
                     continue;
                 }
 
-                // Plan 优先级加分：pro/team > plus > free
+                // Plan 优先级加分：pro > plus/team > free
                 let plan_bonus = match plan.as_str() {
-                    "team" | "enterprise" => 30.0,
-                    "pro" => 25.0,
-                    "plus" => 20.0,
+                    "pro" => 30.0,
+                    "plus" | "team" | "enterprise" => 20.0,
                     "edu" | "business" => 15.0,
                     "free" | "unknown" => 0.0,
                     _ => 10.0,
