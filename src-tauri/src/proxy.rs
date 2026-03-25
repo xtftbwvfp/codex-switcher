@@ -301,6 +301,18 @@ fn mark_current_banned(state: &ProxyState) {
 }
 
 /// 429 后标记当前账号的 5h 额度为耗尽
+/// 标记指定账号的 5h 额度为耗尽
+fn mark_account_quota_depleted(state: &ProxyState, account_id: &str) {
+    if let Ok(mut store) = state.store.lock() {
+        if let Some(account) = store.accounts.get_mut(account_id) {
+            if let Some(ref mut q) = account.cached_quota {
+                q.five_hour_left = 0.0;
+            }
+            let _ = store.save();
+        }
+    }
+}
+
 fn mark_current_quota_depleted(state: &ProxyState) {
     if let Ok(mut store) = state.store.lock() {
         if let Some(current_id) = store.current.clone() {
@@ -754,11 +766,75 @@ async fn handle_websocket(
 
         if should_switch {
             println!("[Proxy] WebSocket 预检：当前账号无额度，尝试切号...");
-            if let PickResult::Found { id, token: new_token } = pick_next_account(&state) {
-                if do_switch(&state, &id, SwitchReason::WebSocketPrecheck).is_ok() {
-                    is_chatgpt = new_token.starts_with("eyJ");
-                    token = new_token;
-                    println!("[Proxy] WebSocket 预检切号成功");
+            // 最多尝试 3 个候选号，查 API 确认有额度才切
+            for _attempt in 0..3 {
+                if let PickResult::Found { id, token: new_token } = pick_next_account(&state) {
+                    // 查 API 确认候选号是否真的有额度
+                    let has_quota = {
+                        let (at, aid, rt) = {
+                            let store = state.store.lock().map_err(|e| e.to_string()).ok();
+                            if let Some(s) = store {
+                                let acc = s.accounts.get(&id);
+                                acc.map(|a| (
+                                    AccountStore::extract_access_token(&a.auth_json),
+                                    AccountStore::extract_account_id(&a.auth_json),
+                                    a.refresh_token.clone(),
+                                )).unwrap_or((None, None, None))
+                            } else {
+                                (None, None, None)
+                            }
+                        };
+                        if let Some(access_token) = at {
+                            match crate::usage::UsageFetcher::fetch_usage_direct(
+                                access_token, aid, rt, false
+                            ).await {
+                                Ok((usage, _)) => {
+                                    // 更新缓存
+                                    if let Ok(mut store) = state.store.lock() {
+                                        if let Some(acc) = store.accounts.get_mut(&id) {
+                                            acc.cached_quota = Some(crate::account::CachedQuota {
+                                                five_hour_left: usage.five_hour_left as f64,
+                                                five_hour_reset: usage.five_hour_reset.clone(),
+                                                five_hour_reset_at: usage.five_hour_reset_at,
+                                                five_hour_label: usage.five_hour_label.clone(),
+                                                weekly_left: usage.weekly_left as f64,
+                                                weekly_reset: usage.weekly_reset.clone(),
+                                                weekly_reset_at: usage.weekly_reset_at,
+                                                weekly_label: usage.weekly_label.clone(),
+                                                plan_type: usage.plan_type.clone(),
+                                                is_valid_for_cli: usage.is_valid_for_cli,
+                                                updated_at: chrono::Utc::now(),
+                                            });
+                                            let _ = store.save();
+                                        }
+                                    }
+                                    usage.five_hour_left > 0 && usage.weekly_left > 0
+                                }
+                                Err(e) => {
+                                    println!("[Proxy] 预检查询候选号额度失败: {}", e);
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if has_quota {
+                        if do_switch(&state, &id, SwitchReason::WebSocketPrecheck).is_ok() {
+                            is_chatgpt = new_token.starts_with("eyJ");
+                            token = new_token;
+                            println!("[Proxy] WebSocket 预检切号成功（已确认有额度）");
+                        }
+                        break;
+                    } else {
+                        println!("[Proxy] 候选号无额度，跳过继续找...");
+                        // 标记为耗尽，下次不再选
+                        mark_account_quota_depleted(&state, &id);
+                    }
+                } else {
+                    println!("[Proxy] 无可用候选号");
+                    break;
                 }
             }
         }
