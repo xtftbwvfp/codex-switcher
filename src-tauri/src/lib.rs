@@ -620,7 +620,7 @@ pub fn score_candidate_accounts(
         }
 
         let score = match &account.cached_quota {
-            None => 100.0, // 无缓存 → 假设满额度
+            None => 50.0, // 无缓存 → 不确定，给中等分数，有缓存的优先
             Some(q) => {
                 let plan = q.plan_type.to_lowercase();
                 let is_free = plan == "free" || plan == "unknown";
@@ -630,9 +630,10 @@ pub fn score_candidate_accounts(
                 }
 
                 // 5h 可用度
+                // reset_at 过期给 50 分（可能恢复但不确定），有额度的号优先
                 let five_h = if q.five_hour_left <= 0.0 {
                     match q.five_hour_reset_at {
-                        Some(reset_at) if now >= reset_at => 100.0,
+                        Some(reset_at) if now >= reset_at => 50.0,
                         _ => 0.0,
                     }
                 } else {
@@ -642,7 +643,7 @@ pub fn score_candidate_accounts(
                 // 周可用度
                 let weekly = if q.weekly_left <= 0.0 {
                     match q.weekly_reset_at {
-                        Some(reset_at) if now >= reset_at => 100.0,
+                        Some(reset_at) if now >= reset_at => 50.0,
                         _ => 0.0,
                     }
                 } else {
