@@ -39,7 +39,7 @@ const CHATGPT_ORIGIN: &str = "https://chatgpt.com/backend-api/codex";
 /// API key 用的上游
 const API_HOST: &str = "api.openai.com";
 const API_ORIGIN: &str = "https://api.openai.com";
-const MAX_429_RETRIES: usize = 2;
+const MAX_429_RETRIES: usize = 5;
 
 /// 统一的响应 Body 类型：支持 Full（错误/小响应）和 Stream（SSE 流式）
 type ProxyBody = BoxBody<Bytes, String>;
