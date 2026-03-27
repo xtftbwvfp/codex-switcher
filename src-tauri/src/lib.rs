@@ -636,7 +636,7 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
     let mut scored: Vec<(String, String, f64)> = Vec::new();
 
     for account in store.accounts.values() {
-        if account.id == current_id || account.is_banned {
+        if account.id == current_id || account.is_banned || account.is_token_invalid {
             continue;
         }
 
@@ -783,15 +783,27 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
     )
     .await;
 
-    // 检测封号/失效：ACCOUNT_BANNED 或 TOKEN_INVALID 都标记为不可用
+    // 检测封号/失效：分开标记
     if let Err(ref e) = result {
-        if e.contains("ACCOUNT_BANNED") || e.contains("TOKEN_INVALID") {
+        if e.contains("ACCOUNT_BANNED") {
             let mut store = state.store.lock().map_err(|e| e.to_string())?;
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_banned = true;
+                account.is_token_invalid = false;
                 if let Err(e) = store.save() {
-                eprintln!("[Store] 保存失败: {}", e);
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
             }
+            return Err(e.clone());
+        }
+        if e.contains("TOKEN_INVALID") {
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            if let Some(account) = store.accounts.get_mut(&id) {
+                account.is_token_invalid = true;
+                account.is_banned = false;
+                if let Err(e) = store.save() {
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
             }
             return Err(e.clone());
         }
@@ -949,15 +961,27 @@ async fn get_quota_by_id(
     )
     .await;
 
-    // 检测封号/失效：ACCOUNT_BANNED 或 TOKEN_INVALID 都标记为不可用
+    // 检测封号/失效：分开标记
     if let Err(ref e) = result {
-        if e.contains("ACCOUNT_BANNED") || e.contains("TOKEN_INVALID") {
+        if e.contains("ACCOUNT_BANNED") {
             let mut store = state.store.lock().map_err(|e| e.to_string())?;
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_banned = true;
+                account.is_token_invalid = false;
                 if let Err(e) = store.save() {
-                eprintln!("[Store] 保存失败: {}", e);
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
             }
+            return Err(e.clone());
+        }
+        if e.contains("TOKEN_INVALID") {
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            if let Some(account) = store.accounts.get_mut(&id) {
+                account.is_token_invalid = true;
+                account.is_banned = false;
+                if let Err(e) = store.save() {
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
             }
             return Err(e.clone());
         }
@@ -1552,6 +1576,7 @@ mod tests {
             cached_quota: None,
             keepalive: account::KeepaliveState::default(),
             is_banned: false,
+            is_token_invalid: false,
         }
     }
 

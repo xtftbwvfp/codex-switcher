@@ -137,6 +137,10 @@ pub struct Account {
     /// 该账号是否已被 OpenAI 封禁
     #[serde(default)]
     pub is_banned: bool,
+
+    /// 该账号授权是否已失效（需重新登录）
+    #[serde(default)]
+    pub is_token_invalid: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +355,7 @@ impl AccountStore {
             cached_quota: None,
             keepalive: KeepaliveState::default(),
             is_banned: false,
+            is_token_invalid: false,
         };
 
         self.accounts.insert(id.clone(), account.clone());

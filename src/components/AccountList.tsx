@@ -72,6 +72,8 @@ export function AccountList({
             if (acc.is_banned) {
                 initialBanned.add(acc.id);
                 initialInvalids.add(acc.id);
+            } else if (acc.is_token_invalid) {
+                initialInvalids.add(acc.id);
             }
             if (acc.cached_quota) {
                 const isValid = acc.cached_quota.is_valid_for_cli !== false;
