@@ -472,16 +472,44 @@ impl AccountStore {
 
     /// 从 auth_json 中提取 access_token
     pub fn extract_access_token(auth_json: &Value) -> Option<String> {
-        auth_json
+        // 优先从 tokens 对象取
+        let from_tokens = auth_json
             .get("tokens")
-            .and_then(|t| t.get("access_token"))
-            .or_else(|| auth_json.get("access_token"))
-            .and_then(|v| v.as_str())
+            .and_then(|t| {
+                // tokens 可能是对象或字符串（历史数据兼容）
+                if t.is_object() {
+                    t.get("access_token").and_then(|v| v.as_str())
+                } else if let Some(s) = t.as_str() {
+                    // tokens 被存为 Python repr 字符串，尝试提取
+                    extract_token_from_str(s, "access_token")
+                } else {
+                    None
+                }
+            });
+
+        from_tokens
+            .or_else(|| auth_json.get("access_token").and_then(|v| v.as_str()))
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
     }
 
+}
+
+/// 从 Python repr 格式的字符串中提取 token 值
+/// 如: "{'access_token': 'eyJ...', 'refresh_token': '...'}"
+fn extract_token_from_str<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("'{}': '", key);
+    if let Some(start) = s.find(&pattern) {
+        let value_start = start + pattern.len();
+        if let Some(end) = s[value_start..].find('\'') {
+            return Some(&s[value_start..value_start + end]);
+        }
+    }
+    None
+}
+
+impl AccountStore {
     /// 从 auth_json 中提取 account_id
     pub fn extract_account_id(auth_json: &Value) -> Option<String> {
         auth_json
@@ -685,7 +713,12 @@ impl AccountStore {
         let now = Utc::now();
 
         if let Some(obj) = account.auth_json.as_object_mut() {
-            if !obj.contains_key("tokens") {
+            // 如果 tokens 不存在或不是对象（如被存为字符串），重建为空对象
+            let needs_reset = obj
+                .get("tokens")
+                .map(|v| !v.is_object())
+                .unwrap_or(true);
+            if needs_reset {
                 obj.insert("tokens".to_string(), serde_json::json!({}));
             }
             if let Some(tokens_obj) = obj.get_mut("tokens").and_then(|v| v.as_object_mut()) {
