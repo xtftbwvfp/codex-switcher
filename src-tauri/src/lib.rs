@@ -8,9 +8,9 @@ mod oauth;
 mod oauth_server;
 mod proxy;
 mod refresh_lock;
+mod scheduler;
 mod switch_log;
 mod token_tracker;
-mod scheduler;
 mod tray;
 mod usage;
 
@@ -174,8 +174,14 @@ fn get_proxy_status(state: State<AppState>) -> Result<ProxyStatus, String> {
         port: store.settings.proxy_port,
         is_running,
         base_url: format!("http://localhost:{}/v1", store.settings.proxy_port),
-        total_requests: state.proxy_stats.total_requests.load(std::sync::atomic::Ordering::Relaxed),
-        auto_switches: state.proxy_stats.auto_switches.load(std::sync::atomic::Ordering::Relaxed),
+        total_requests: state
+            .proxy_stats
+            .total_requests
+            .load(std::sync::atomic::Ordering::Relaxed),
+        auto_switches: state
+            .proxy_stats
+            .auto_switches
+            .load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -188,7 +194,10 @@ fn update_settings(
 ) -> Result<(), String> {
     let (prev_bg_refresh, prev_proxy_enabled) = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let prev = (store.settings.background_refresh, store.settings.proxy_enabled);
+        let prev = (
+            store.settings.background_refresh,
+            store.settings.proxy_enabled,
+        );
         store.settings = settings.clone();
         store.save()?;
         prev
@@ -504,7 +513,9 @@ async fn switch_account(
                                 token_res.id_token,
                                 token_res.expires_in,
                             );
-                            let _ = store.save();
+                            if let Err(e) = store.save() {
+                eprintln!("[Store] 保存失败: {}", e);
+            }
                             (token_res.access_token, token_res.refresh_token)
                         } else {
                             (access_token, refresh_token)
@@ -548,7 +559,9 @@ async fn switch_account(
                     is_valid_for_cli: usage.is_valid_for_cli,
                     updated_at: chrono::Utc::now(),
                 });
-                let _ = store.save();
+                if let Err(e) = store.save() {
+                eprintln!("[Store] 保存失败: {}", e);
+            }
             }
         }
         Err(e) => {
@@ -579,11 +592,21 @@ async fn switch_account(
     // 记录切号日志
     {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let from_name = store.accounts.values()
+        let from_name = store
+            .accounts
+            .values()
             .find(|a| Some(&a.id) != store.current.as_ref() && a.last_used.is_some())
             .map(|a| a.name.clone());
-        let to_name = store.accounts.get(&target_id).map(|a| a.name.clone()).unwrap_or_default();
-        let to_quota = store.accounts.get(&target_id).and_then(|a| a.cached_quota.as_ref()).map(|q| q.five_hour_left);
+        let to_name = store
+            .accounts
+            .get(&target_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        let to_quota = store
+            .accounts
+            .get(&target_id)
+            .and_then(|a| a.cached_quota.as_ref())
+            .map(|q| q.five_hour_left);
         state.switch_logger.log_switch(
             from_name,
             to_name,
@@ -605,9 +628,7 @@ async fn switch_account(
 /// 预测下一个拟切换的账号信息 (仅基于缓存，不发起网络请求)
 /// 共享评分选号算法：基于 CachedQuota 的 reset_at 时间戳和剩余额度评分
 /// 返回 (account_id, account_name, score) 按得分从高到低排序
-pub fn score_candidate_accounts(
-    store: &AccountStore,
-) -> Vec<(String, String, f64)> {
+pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f64)> {
     let current_id = store.current.as_deref().unwrap_or("");
     let allow_free = store.settings.allow_auto_switch_to_free;
     let now = chrono::Utc::now().timestamp();
@@ -679,7 +700,9 @@ pub fn score_candidate_accounts(
 pub fn predict_next_account_internal(state: tauri::State<'_, AppState>) -> Option<(String, i32)> {
     let store = state.store.lock().ok()?;
     let candidates = score_candidate_accounts(&store);
-    candidates.first().map(|(_, name, score)| (name.clone(), *score as i32))
+    candidates
+        .first()
+        .map(|(_, name, score)| (name.clone(), *score as i32))
 }
 
 /// 智能切号：选最优账号并切换
@@ -699,21 +722,21 @@ pub async fn switch_to_next_account_internal(
 
     // 2. 按得分从高到低尝试，查 API 确认额度后切换
     for (target_id, target_name, score) in &candidates {
-        println!(
-            "[SmartSwitch] 候选: {} (评分 {:.0})",
-            target_name, score
-        );
+        println!("[SmartSwitch] 候选: {} (评分 {:.0})", target_name, score);
 
         // 查 API 确认最新额度
         let quota = match get_quota_internal(&state, target_id.clone()).await {
             Ok(u) => u,
             Err(e) => {
                 // 封号检测
-                if e.contains("ACCOUNT_BANNED") {
+                if e.contains("ACCOUNT_BANNED") || e.contains("TOKEN_INVALID") {
                     println!("[SmartSwitch] 账号 {} 已封号，跳过", target_name);
                     continue;
                 }
-                println!("[SmartSwitch] 账号 {} 额度查询失败: {}，跳过", target_name, e);
+                println!(
+                    "[SmartSwitch] 账号 {} 额度查询失败: {}，跳过",
+                    target_name, e
+                );
                 continue;
             }
         };
@@ -760,13 +783,15 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
     )
     .await;
 
-    // 检测封号：如果 fetch 返回 ACCOUNT_BANNED，持久化标记
+    // 检测封号/失效：ACCOUNT_BANNED 或 TOKEN_INVALID 都标记为不可用
     if let Err(ref e) = result {
-        if e.contains("ACCOUNT_BANNED") {
+        if e.contains("ACCOUNT_BANNED") || e.contains("TOKEN_INVALID") {
             let mut store = state.store.lock().map_err(|e| e.to_string())?;
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_banned = true;
-                let _ = store.save();
+                if let Err(e) = store.save() {
+                eprintln!("[Store] 保存失败: {}", e);
+            }
             }
             return Err(e.clone());
         }
@@ -785,7 +810,9 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
                 res.id_token,
                 res.expires_in,
             );
-            let _ = store.save();
+            if let Err(e) = store.save() {
+                eprintln!("[Store] 保存失败: {}", e);
+            }
         }
     }
 
@@ -794,7 +821,9 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         if let Some(account) = store.accounts.get_mut(&id) {
             account.cached_quota = Some(usage_to_cached(&display));
-            let _ = store.save();
+            if let Err(e) = store.save() {
+                eprintln!("[Store] 保存失败: {}", e);
+            }
         }
     }
 
@@ -920,13 +949,15 @@ async fn get_quota_by_id(
     )
     .await;
 
-    // 检测封号：如果 fetch 返回 ACCOUNT_BANNED，持久化标记
+    // 检测封号/失效：ACCOUNT_BANNED 或 TOKEN_INVALID 都标记为不可用
     if let Err(ref e) = result {
-        if e.contains("ACCOUNT_BANNED") {
+        if e.contains("ACCOUNT_BANNED") || e.contains("TOKEN_INVALID") {
             let mut store = state.store.lock().map_err(|e| e.to_string())?;
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_banned = true;
-                let _ = store.save();
+                if let Err(e) = store.save() {
+                eprintln!("[Store] 保存失败: {}", e);
+            }
             }
             return Err(e.clone());
         }
@@ -1072,7 +1103,10 @@ fn get_token_history(days: u32) -> Result<Vec<token_tracker::TokenHistoryEntry>,
 
 /// 获取切号历史
 #[tauri::command]
-fn get_switch_history(state: State<AppState>, days: u32) -> Result<Vec<switch_log::SwitchEvent>, String> {
+fn get_switch_history(
+    state: State<AppState>,
+    days: u32,
+) -> Result<Vec<switch_log::SwitchEvent>, String> {
     Ok(state.switch_logger.get_history(days))
 }
 
@@ -1241,8 +1275,7 @@ fn get_codex_fast_mode() -> Result<bool, String> {
         return Ok(false);
     }
 
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("读取失败: {}", e))?;
+    let content = std::fs::read_to_string(&config_path).map_err(|e| format!("读取失败: {}", e))?;
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -1283,15 +1316,19 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 
     // 快速路径：先检查磁盘 auth 与当前激活账号是否身份一致
     // 这解决了 JWT 过期/损坏导致 email 提取失败的误报问题
-    let current_matches_disk = store.current.as_ref().and_then(|curr_id| {
-        store.accounts.get(curr_id).map(|a| {
-            AccountStore::auth_identity_matches(&a.auth_json, &disk_auth)
-                || disk_email
-                    .as_deref()
-                    .map(|e| a.name.to_lowercase() == e.to_lowercase())
-                    .unwrap_or(false)
+    let current_matches_disk = store
+        .current
+        .as_ref()
+        .and_then(|curr_id| {
+            store.accounts.get(curr_id).map(|a| {
+                AccountStore::auth_identity_matches(&a.auth_json, &disk_auth)
+                    || disk_email
+                        .as_deref()
+                        .map(|e| a.name.to_lowercase() == e.to_lowercase())
+                        .unwrap_or(false)
+            })
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
 
     if current_matches_disk {
         return Ok(SyncStatus {
@@ -1417,8 +1454,15 @@ pub fn run() {
                 .map(|s| (s.settings.proxy_enabled, s.settings.proxy_port))
                 .unwrap_or((false, 18080));
             if proxy_enabled {
-                let handle =
-                    proxy::start(state.store.clone(), proxy_port, app.handle().clone(), state.proxy_stats.clone(), state.token_tracker.clone(), state.ws_disconnect.clone(), state.switch_logger.clone());
+                let handle = proxy::start(
+                    state.store.clone(),
+                    proxy_port,
+                    app.handle().clone(),
+                    state.proxy_stats.clone(),
+                    state.token_tracker.clone(),
+                    state.ws_disconnect.clone(),
+                    state.switch_logger.clone(),
+                );
                 let mut proxy_handle = state.proxy_handle.lock().unwrap();
                 *proxy_handle = Some(handle);
                 println!("[Proxy] 代理已随应用启动 (端口 {})", proxy_port);

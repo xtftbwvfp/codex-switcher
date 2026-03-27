@@ -124,6 +124,22 @@ impl UsageFetcher {
         let json: Value =
             serde_json::from_str(&text).map_err(|e| format!("解析 JSON 失败: {}", e))?;
 
+        // 检测 200 状态码下的软封号/停用响应，如 {"detail":{"code":"deactivated_workspace"}}
+        if let Some(detail_code) = json
+            .get("detail")
+            .and_then(|d| d.get("code"))
+            .and_then(|c| c.as_str())
+        {
+            let code_lower = detail_code.to_lowercase();
+            if code_lower.contains("deactivated")
+                || code_lower.contains("banned")
+                || code_lower.contains("suspended")
+            {
+                println!("[Usage] 检测到账号停用: detail.code={}", detail_code);
+                return Err("ACCOUNT_BANNED:该账号已被封禁(workspace 已停用)".to_string());
+            }
+        }
+
         let display = Self::parse_usage_response(&json)?;
 
         Ok((display, new_tokens))
