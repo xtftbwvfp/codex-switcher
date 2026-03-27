@@ -267,7 +267,13 @@ impl AccountStore {
         let path = Self::config_path();
         let mut store = if path.exists() {
             let content = fs::read_to_string(&path).unwrap_or_default();
-            serde_json::from_str(&content).unwrap_or_default()
+            match serde_json::from_str::<Self>(&content) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[AccountStore] 关键错误：无法解析 accounts.json ({}). \n内容可能损坏，为保护数据已回退到内存状态。错误内容：{}", path.display(), e);
+                    Self::default()
+                }
+            }
         } else {
             Self::default()
         };
@@ -473,19 +479,17 @@ impl AccountStore {
     /// 从 auth_json 中提取 access_token
     pub fn extract_access_token(auth_json: &Value) -> Option<String> {
         // 优先从 tokens 对象取
-        let from_tokens = auth_json
-            .get("tokens")
-            .and_then(|t| {
-                // tokens 可能是对象或字符串（历史数据兼容）
-                if t.is_object() {
-                    t.get("access_token").and_then(|v| v.as_str())
-                } else if let Some(s) = t.as_str() {
-                    // tokens 被存为 Python repr 字符串，尝试提取
-                    extract_token_from_str(s, "access_token")
-                } else {
-                    None
-                }
-            });
+        let from_tokens = auth_json.get("tokens").and_then(|t| {
+            // tokens 可能是对象或字符串（历史数据兼容）
+            if t.is_object() {
+                t.get("access_token").and_then(|v| v.as_str())
+            } else if let Some(s) = t.as_str() {
+                // tokens 被存为 Python repr 字符串，尝试提取
+                extract_token_from_str(s, "access_token")
+            } else {
+                None
+            }
+        });
 
         from_tokens
             .or_else(|| auth_json.get("access_token").and_then(|v| v.as_str()))
@@ -493,7 +497,6 @@ impl AccountStore {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
     }
-
 }
 
 /// 从 Python repr 格式的字符串中提取 token 值
@@ -714,10 +717,7 @@ impl AccountStore {
 
         if let Some(obj) = account.auth_json.as_object_mut() {
             // 如果 tokens 不存在或不是对象（如被存为字符串），重建为空对象
-            let needs_reset = obj
-                .get("tokens")
-                .map(|v| !v.is_object())
-                .unwrap_or(true);
+            let needs_reset = obj.get("tokens").map(|v| !v.is_object()).unwrap_or(true);
             if needs_reset {
                 obj.insert("tokens".to_string(), serde_json::json!({}));
             }

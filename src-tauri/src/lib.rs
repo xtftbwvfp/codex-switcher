@@ -305,6 +305,10 @@ fn check_sync_conflict(state: State<AppState>) -> Result<Option<String>, String>
 #[tauri::command]
 fn delete_account(state: State<AppState>, app: tauri::AppHandle, id: String) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    // 如果删的是当前账号，先清空 current
+    if store.current.as_deref() == Some(&id) {
+        store.current = None;
+    }
     store.delete_account(&id)?;
     store.save()?;
     // 联动刷新托盘菜单
@@ -514,8 +518,8 @@ async fn switch_account(
                                 token_res.expires_in,
                             );
                             if let Err(e) = store.save() {
-                eprintln!("[Store] 保存失败: {}", e);
-            }
+                                eprintln!("[Store] 保存失败: {}", e);
+                            }
                             (token_res.access_token, token_res.refresh_token)
                         } else {
                             (access_token, refresh_token)
@@ -560,8 +564,8 @@ async fn switch_account(
                     updated_at: chrono::Utc::now(),
                 });
                 if let Err(e) = store.save() {
-                eprintln!("[Store] 保存失败: {}", e);
-            }
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
             }
         }
         Err(e) => {
@@ -803,13 +807,8 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
         return Err("TOKEN_INVALID:无 access_token 且无 refresh_token".to_string());
     };
 
-    let result = UsageFetcher::fetch_usage_direct(
-        access_token,
-        account_id,
-        refresh_token,
-        true,
-    )
-    .await;
+    let result =
+        UsageFetcher::fetch_usage_direct(access_token, account_id, refresh_token, true).await;
 
     // 检测封号/失效：分开标记
     if let Err(ref e) = result {

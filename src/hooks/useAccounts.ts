@@ -143,17 +143,23 @@ export function useAccounts() {
         }
     }, [loadData]);
 
-    // 删除账号
+    // 删除账号（带确认）
     const deleteAccount = useCallback(async (id: string) => {
+        const account = accounts.find(a => a.id === id);
+        const name = account?.name || id;
+        if (!window.confirm(`确定要删除账号 ${name} 吗？`)) return;
         try {
             setError(null);
+            if (currentId === id) {
+                setCurrentId(null);
+            }
             await invoke('delete_account', { id });
             await loadData();
         } catch (err) {
             setError(String(err));
             throw err;
         }
-    }, [loadData]);
+    }, [loadData, accounts, currentId]);
 
     // 更新账号
     const updateAccount = useCallback(async (id: string, name?: string, notes?: string) => {
