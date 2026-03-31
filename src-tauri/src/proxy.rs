@@ -755,8 +755,7 @@ async fn handle_websocket(
                         if is_free {
                             q.five_hour_left <= 0.0
                         } else {
-                            // 5h 或周额度不足时触发预检（周额度 <=10% 也不够一次请求）
-                            q.five_hour_left <= 0.0 || q.weekly_left <= 10.0
+                            q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
                         }
                     })
                 }).unwrap_or(false)
