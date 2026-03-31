@@ -755,7 +755,8 @@ async fn handle_websocket(
                         if is_free {
                             q.five_hour_left <= 0.0
                         } else {
-                            q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
+                            // 5h 或周额度不足时触发预检（周额度 <=10% 也不够一次请求）
+                            q.five_hour_left <= 0.0 || q.weekly_left <= 10.0
                         }
                     })
                 }).unwrap_or(false)
@@ -971,26 +972,36 @@ async fn handle_websocket(
 /// 只匹配 response.failed 类型的错误消息，避免误判正常消息中的 rate_limit 字段
 fn detect_ws_rate_limit(msg: &tungstenite::Message) -> bool {
     if let tungstenite::Message::Text(ref text) = msg {
-        // 必须是错误类型的消息
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
-            let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            // 只在 response.failed 或 error 类型中检测
-            if msg_type == "response.failed" || msg_type == "error" {
-                let error_code = val
-                    .get("response")
+        // 先做快速文本匹配（不需要 JSON 解析）
+        let lower = text.to_lowercase();
+        if lower.contains("rate_limit") || lower.contains("usage limit") || lower.contains("usage_limit") {
+            println!("[Proxy] WS 消息包含限额关键词, type检查中...");
+
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+                let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                println!("[Proxy] WS 消息 type={}", msg_type);
+
+                // response.failed / error / 或直接包含错误
+                if msg_type == "response.failed" || msg_type == "error" {
+                    return true;
+                }
+
+                // 兜底：即使 type 不匹配，只要错误码或消息匹配也算
+                let has_error = val.get("response")
                     .and_then(|r| r.get("error"))
-                    .and_then(|e| e.get("code"))
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
-                let error_msg = val
-                    .get("response")
-                    .and_then(|r| r.get("error"))
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("");
-                return error_code == "rate_limit_exceeded"
-                    || error_msg.contains("hit your usage limit")
-                    || error_msg.contains("usage limit");
+                    .is_some()
+                    || val.get("error").is_some();
+
+                if has_error {
+                    println!("[Proxy] WS 消息有 error 字段，判定为限额");
+                    return true;
+                }
+
+                // 最后兜底：消息文本直接包含限额关键词
+                if lower.contains("hit your usage limit") {
+                    println!("[Proxy] WS 消息文本包含 'hit your usage limit'");
+                    return true;
+                }
             }
         }
     }
