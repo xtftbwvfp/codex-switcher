@@ -969,60 +969,91 @@ async fn handle_websocket(
 
 /// 检测 WebSocket 消息是否为限额错误
 /// 只匹配 response.failed 类型的错误消息，避免误判正常消息中的 rate_limit 字段
+/// 限额关键词（快速文本匹配用）
+const RATE_LIMIT_KEYWORDS: &[&str] = &[
+    "rate_limit",
+    "rate limit",
+    "usage_limit",
+    "usage limit",
+    "too many requests",
+    "insufficient_quota",
+    "billing_hard_limit",
+    "tokens per min",
+    "requests per min",
+];
+
 fn detect_ws_rate_limit(msg: &tungstenite::Message) -> bool {
     if let tungstenite::Message::Text(ref text) = msg {
-        // 先做快速文本匹配（不需要 JSON 解析）
         let lower = text.to_lowercase();
-        if lower.contains("rate_limit") || lower.contains("usage limit") || lower.contains("usage_limit") {
-            println!("[Proxy] WS 消息包含限额关键词, type检查中...");
 
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
-                let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                println!("[Proxy] WS 消息 type={}", msg_type);
+        // 快速文本匹配
+        let matched = RATE_LIMIT_KEYWORDS.iter().any(|kw| lower.contains(kw));
+        if !matched {
+            return false;
+        }
 
-                // response.failed / error / 或直接包含错误
-                if msg_type == "response.failed" || msg_type == "error" {
-                    return true;
-                }
+        println!("[Proxy] WS 消息包含限额关键词");
 
-                // 兜底：即使 type 不匹配，只要错误码或消息匹配也算
-                let has_error = val.get("response")
-                    .and_then(|r| r.get("error"))
-                    .is_some()
-                    || val.get("error").is_some();
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+            let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-                if has_error {
-                    println!("[Proxy] WS 消息有 error 字段，判定为限额");
-                    return true;
-                }
-
-                // 最后兜底：消息文本直接包含限额关键词
-                if lower.contains("hit your usage limit") {
-                    println!("[Proxy] WS 消息文本包含 'hit your usage limit'");
-                    return true;
-                }
+            // response.failed / error 类型直接判定
+            if msg_type == "response.failed" || msg_type == "error" {
+                println!("[Proxy] WS 限额: type={}", msg_type);
+                return true;
             }
+
+            // 有 error 字段也判定
+            if val.get("response").and_then(|r| r.get("error")).is_some()
+                || val.get("error").is_some()
+            {
+                println!("[Proxy] WS 限额: 有 error 字段");
+                return true;
+            }
+        }
+
+        // JSON 解析失败或没有 error 字段，但文本明确包含限额消息
+        if lower.contains("hit your usage limit")
+            || lower.contains("rate limit reached")
+            || lower.contains("too many requests")
+        {
+            println!("[Proxy] WS 限额: 文本兜底匹配");
+            return true;
         }
     }
     false
 }
 
-/// 检测 WebSocket 消息是否为封号错误
+/// 封号关键词
+const BANNED_KEYWORDS: &[&str] = &[
+    "deactivated",
+    "banned",
+    "suspended",
+    "account_deactivated",
+    "deactivated_workspace",
+];
+
 fn detect_ws_banned(msg: &tungstenite::Message) -> bool {
     if let tungstenite::Message::Text(ref text) = msg {
+        let lower = text.to_lowercase();
+
+        // 快速文本匹配
+        if !BANNED_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
+            return false;
+        }
+
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
             let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
             if msg_type == "response.failed" || msg_type == "error" {
-                let error_msg = val
-                    .get("response")
-                    .and_then(|r| r.get("error"))
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                return error_msg.contains("deactivated")
-                    || error_msg.contains("banned")
-                    || error_msg.contains("suspended");
+                return true;
+            }
+
+            // error 字段里包含封号关键词
+            if val.get("response").and_then(|r| r.get("error")).is_some()
+                || val.get("error").is_some()
+            {
+                return true;
             }
         }
     }
