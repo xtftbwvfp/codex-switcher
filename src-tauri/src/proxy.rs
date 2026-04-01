@@ -295,6 +295,17 @@ fn mark_current_banned(state: &ProxyState) {
                 let _ = store.save();
                 println!("[Proxy] 账号 {} 已标记为封号", name);
                 let _ = state.app_handle.emit("proxy-account-banned", &name);
+                // macOS 系统通知
+                let notify_name = name.clone();
+                std::thread::spawn(move || {
+                    let _ = std::process::Command::new("osascript")
+                        .arg("-e")
+                        .arg(format!(
+                            "display notification \"{}\" with title \"Codex Switcher\" subtitle \"检测到封号\"",
+                            notify_name
+                        ))
+                        .output();
+                });
             }
         }
     }
@@ -347,12 +358,25 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
     println!("[Proxy] 自动切号 → {} ({})", to_name, reason);
 
     // 记录切号日志
-    state.switch_logger.log_switch(from_name, to_name.clone(), reason, from_quota, to_quota);
+    state.switch_logger.log_switch(from_name.clone(), to_name.clone(), reason, from_quota, to_quota);
 
     state.stats.auto_switches.fetch_add(1, Ordering::Relaxed);
     state.ws_disconnect.notify_waiters();
     let _ = state.app_handle.emit("proxy-account-switched", &to_name);
     let _ = state.app_handle.emit("accounts-updated", ());
+
+    // macOS 系统通知
+    let from = from_name.unwrap_or_else(|| "无".to_string());
+    let notify_msg = format!("{} → {}", from, to_name);
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "display notification \"{}\" with title \"Codex Switcher\" subtitle \"自动切号\"",
+                notify_msg
+            ))
+            .output();
+    });
 
     Ok(())
 }
