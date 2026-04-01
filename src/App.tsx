@@ -129,6 +129,33 @@ function App() {
     };
   }, []);
 
+  // 监听代理切号/封号事件
+  const [proxyNotice, setProxyNotice] = useState<string | null>(null);
+  useEffect(() => {
+    const unsub1 = listen<string>('proxy-account-switched', (e) => {
+      const msg = `代理已自动切号 → ${e.payload}`;
+      setProxyNotice(msg);
+      setTimeout(() => setProxyNotice(null), 8000);
+      refresh();
+      checkProxyStatus();
+    });
+    const unsub2 = listen<string>('proxy-account-banned', (e) => {
+      const msg = `检测到封号: ${e.payload}，已自动切换`;
+      setProxyNotice(msg);
+      setTimeout(() => setProxyNotice(null), 10000);
+      refresh();
+    });
+    const unsub3 = listen<string>('proxy-all-exhausted', (e) => {
+      setProxyNotice(e.payload);
+      setTimeout(() => setProxyNotice(null), 15000);
+    });
+    return () => {
+      unsub1.then(f => f());
+      unsub2.then(f => f());
+      unsub3.then(f => f());
+    };
+  }, [refresh]);
+
   // 监听设置更新事件
   useEffect(() => {
     const unlisten = listen('settings-updated', () => {
@@ -328,6 +355,12 @@ function App() {
         <div className="error-banner">
           {error && <div>{error}</div>}
           {schedulerError && <div>{schedulerError}</div>}
+        </div>
+      )}
+
+      {proxyNotice && (
+        <div className="proxy-notice-banner" onClick={() => setProxyNotice(null)}>
+          {proxyNotice}
         </div>
       )}
 
