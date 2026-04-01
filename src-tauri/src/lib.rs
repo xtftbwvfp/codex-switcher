@@ -289,13 +289,13 @@ fn import_current_account(
         return Err("当前 auth.json 缺少 refresh_token，无法自动续期，请重新登录".to_string());
     }
 
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    let account = store.add_account(name, auth_json, notes);
-    store.save()?;
-
-    // 联动刷新托盘菜单
+    let account = {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let account = store.add_account(name, auth_json, notes);
+        store.save()?;
+        account
+    };
     crate::tray::update_tray_menu(&app);
-
     Ok(account)
 }
 
@@ -326,14 +326,15 @@ fn check_sync_conflict(state: State<AppState>) -> Result<Option<String>, String>
 /// 删除账号
 #[tauri::command]
 fn delete_account(state: State<AppState>, app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    // 如果删的是当前账号，先清空 current
-    if store.current.as_deref() == Some(&id) {
-        store.current = None;
-    }
-    store.delete_account(&id)?;
-    store.save()?;
-    // 联动刷新托盘菜单
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        if store.current.as_deref() == Some(&id) {
+            store.current = None;
+        }
+        store.delete_account(&id)?;
+        store.save()?;
+    } // 锁在这里释放
+    // 联动刷新托盘菜单（需要重新获取锁，不会死锁）
     crate::tray::update_tray_menu(&app);
     Ok(())
 }
@@ -347,15 +348,16 @@ fn update_account(
     name: Option<String>,
     notes: Option<String>,
 ) -> Result<(), String> {
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    store.update_account(&id, name, notes)?;
-    store.save()?;
-    // 联动刷新托盘菜单
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        store.update_account(&id, name, notes)?;
+        store.save()?;
+    }
     crate::tray::update_tray_menu(&app);
     Ok(())
 }
 
-/// 设置账号级“非活跃保活刷新”开关
+/// 设置账号级”非活跃保活刷新”开关
 #[tauri::command]
 fn set_account_inactive_refresh_enabled(
     state: State<AppState>,
@@ -390,10 +392,11 @@ fn import_accounts(
             missing.join(", ")
         ));
     }
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    *store = new_store;
-    store.save()?;
-    // 联动刷新托盘菜单
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        *store = new_store;
+        store.save()?;
+    }
     crate::tray::update_tray_menu(&app);
     Ok(())
 }
@@ -416,37 +419,38 @@ async fn finalize_oauth_login(
         .and_then(|id_t| oauth::parse_user_info(id_t))
         .ok_or("无法从授权响应中解析用户信息 (Missing ID Token)")?;
 
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    let account = {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
 
-    // 计算过期时间
-    let expires_at = token_res
-        .expires_in
-        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
+        let expires_at = token_res
+            .expires_in
+            .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
 
-    let auth_json = serde_json::json!({
-        "tokens": {
-            "access_token": token_res.access_token,
-            "refresh_token": token_res.refresh_token,
-            "id_token": token_res.id_token,
-            "account_id": user_info.account_id,
-            "expires_at": expires_at
-        },
-        "last_refresh": chrono::Utc::now().to_rfc3339()
-    });
+        let auth_json = serde_json::json!({
+            "tokens": {
+                "access_token": token_res.access_token,
+                "refresh_token": token_res.refresh_token,
+                "id_token": token_res.id_token,
+                "account_id": user_info.account_id,
+                "expires_at": expires_at
+            },
+            "last_refresh": chrono::Utc::now().to_rfc3339()
+        });
 
-    let mut account = store.add_account(
-        user_info.email,
-        auth_json,
-        Some("OpenAI OAuth 登录".to_string()),
-    );
+        let mut account = store.add_account(
+            user_info.email,
+            auth_json,
+            Some("OpenAI OAuth 登录".to_string()),
+        );
 
-    account.refresh_token = token_res.refresh_token.clone();
-    if let Some(acc) = store.accounts.get_mut(&account.id) {
-        acc.refresh_token = token_res.refresh_token;
-    }
+        account.refresh_token = token_res.refresh_token.clone();
+        if let Some(acc) = store.accounts.get_mut(&account.id) {
+            acc.refresh_token = token_res.refresh_token;
+        }
 
-    store.save()?;
-    // 联动刷新托盘菜单
+        store.save()?;
+        account
+    };
     crate::tray::update_tray_menu(&app);
     Ok(account)
 }
