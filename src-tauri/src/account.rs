@@ -63,6 +63,14 @@ pub struct AppSettings {
     /// Free 账号保护线（0=不特殊处理，35=剩余<35%时切）
     #[serde(default)]
     pub proxy_free_guard: u8,
+
+    /// 切号时发送 macOS 系统通知
+    #[serde(default)]
+    pub notify_on_switch: bool,
+
+    /// 切号时注入消息到 Codex 对话（实验性）
+    #[serde(default)]
+    pub inject_switch_message: bool,
 }
 
 fn default_theme_palette() -> String {
@@ -105,6 +113,8 @@ impl Default for AppSettings {
             proxy_threshold_5h: 0,
             proxy_threshold_weekly: 0,
             proxy_free_guard: 0,
+            notify_on_switch: false,
+            inject_switch_message: false,
         }
     }
 }

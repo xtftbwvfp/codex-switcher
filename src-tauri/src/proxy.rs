@@ -32,6 +32,10 @@ use crate::account::AccountStore;
 use crate::switch_log::{SwitchLogger, SwitchReason};
 use crate::token_tracker::TokenTracker;
 
+/// 待注入的切号通知消息
+static PENDING_INJECT_MSG: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
 /// ChatGPT OAuth 登录用的上游（免费/Plus/Team 账号）
 const CHATGPT_HOST: &str = "chatgpt.com";
 const CHATGPT_ORIGIN: &str = "https://chatgpt.com/backend-api/codex";
@@ -295,17 +299,19 @@ fn mark_current_banned(state: &ProxyState) {
                 let _ = store.save();
                 println!("[Proxy] 账号 {} 已标记为封号", name);
                 let _ = state.app_handle.emit("proxy-account-banned", &name);
-                // macOS 系统通知
-                let notify_name = name.clone();
-                std::thread::spawn(move || {
-                    let _ = std::process::Command::new("osascript")
-                        .arg("-e")
-                        .arg(format!(
-                            "display notification \"{}\" with title \"Codex Switcher\" subtitle \"检测到封号\"",
-                            notify_name
-                        ))
-                        .output();
-                });
+                // macOS 系统通知（可配置）
+                if store.settings.notify_on_switch {
+                    let notify_name = name.clone();
+                    std::thread::spawn(move || {
+                        let _ = std::process::Command::new("osascript")
+                            .arg("-e")
+                            .arg(format!(
+                                "display notification \"{}\" with title \"Codex Switcher\" subtitle \"检测到封号\"",
+                                notify_name
+                            ))
+                            .output();
+                    });
+                }
             }
         }
     }
@@ -365,18 +371,33 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
     let _ = state.app_handle.emit("proxy-account-switched", &to_name);
     let _ = state.app_handle.emit("accounts-updated", ());
 
-    // macOS 系统通知
-    let from = from_name.unwrap_or_else(|| "无".to_string());
-    let notify_msg = format!("{} → {}", from, to_name);
-    std::thread::spawn(move || {
-        let _ = std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(format!(
-                "display notification \"{}\" with title \"Codex Switcher\" subtitle \"自动切号\"",
-                notify_msg
-            ))
-            .output();
-    });
+    // 读取通知设置
+    let notify_enabled = store.settings.notify_on_switch;
+    let inject_enabled = store.settings.inject_switch_message;
+
+    drop(store); // 释放锁
+
+    // macOS 系统通知（可配置）
+    if notify_enabled {
+        let from = from_name.unwrap_or_else(|| "无".to_string());
+        let notify_msg = format!("{} → {}", from, to_name);
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("osascript")
+                .arg("-e")
+                .arg(format!(
+                    "display notification \"{}\" with title \"Codex Switcher\" subtitle \"自动切号\"",
+                    notify_msg
+                ))
+                .output();
+        });
+    }
+
+    // 注入 WebSocket 消息标记（可配置，实验性）
+    if inject_enabled {
+        PENDING_INJECT_MSG.lock().ok().map(|mut msg| {
+            *msg = Some(format!("⚡ [Codex Switcher] 已切换到 {}", to_name));
+        });
+    }
 
     Ok(())
 }
@@ -972,7 +993,7 @@ async fn handle_websocket(
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
-                let client_ws =
+                let mut client_ws =
                     tokio_tungstenite::WebSocketStream::from_raw_socket(
                         io,
                         tungstenite::protocol::Role::Server,
@@ -981,6 +1002,21 @@ async fn handle_websocket(
                     .await;
 
                 println!("[Proxy] WebSocket 客户端已升级，开始桥接");
+
+                // 检查是否有待注入的切号通知消息
+                let inject_text = PENDING_INJECT_MSG.lock().ok().and_then(|mut m| m.take());
+                if let Some(msg_text) = inject_text {
+                    let inject_json = serde_json::json!({
+                        "type": "response.output_text.delta",
+                        "delta": format!("\n{}\n", msg_text)
+                    });
+                    let _ = futures_util::SinkExt::send(
+                        &mut client_ws,
+                        tungstenite::Message::Text(inject_json.to_string().into()),
+                    ).await;
+                    println!("[Proxy] 已注入切号通知到 WebSocket");
+                }
+
                 bridge_websockets(client_ws, upstream_ws, disconnect, state).await;
                 println!("[Proxy] WebSocket 连接已关闭");
             }

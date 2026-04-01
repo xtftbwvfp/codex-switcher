@@ -27,6 +27,8 @@ interface AppSettings {
     proxy_threshold_5h: number;
     proxy_threshold_weekly: number;
     proxy_free_guard: number;
+    notify_on_switch: boolean;
+    inject_switch_message: boolean;
 }
 
 export function Proxy() {
@@ -247,6 +249,49 @@ export function Proxy() {
                             移除
                         </button>
                     </div>
+                </div>
+            </div>
+
+            {/* 通知设置 */}
+            <div className="settings-section">
+                <h3>切号通知</h3>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">macOS 系统通知</span>
+                        <span className="setting-desc">切号时在屏幕右上角弹出系统通知</span>
+                    </div>
+                    <label className="toggle">
+                        <input
+                            type="checkbox"
+                            checked={settings?.notify_on_switch ?? false}
+                            onChange={async e => {
+                                if (!settings) return;
+                                const updated = { ...settings, notify_on_switch: e.target.checked };
+                                setSettings(updated);
+                                await invoke('update_settings', { settings: updated });
+                            }}
+                        />
+                        <span className="toggle-slider"></span>
+                    </label>
+                </div>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">对话内注入通知（实验性）</span>
+                        <span className="setting-desc">切号后在 Codex 对话中插入一条切号提示消息。可能影响对话状态。</span>
+                    </div>
+                    <label className="toggle">
+                        <input
+                            type="checkbox"
+                            checked={settings?.inject_switch_message ?? false}
+                            onChange={async e => {
+                                if (!settings) return;
+                                const updated = { ...settings, inject_switch_message: e.target.checked };
+                                setSettings(updated);
+                                await invoke('update_settings', { settings: updated });
+                            }}
+                        />
+                        <span className="toggle-slider"></span>
+                    </label>
                 </div>
             </div>
 
