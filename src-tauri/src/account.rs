@@ -71,6 +71,18 @@ pub struct AppSettings {
     /// 切号时注入消息到 Codex 对话（实验性）
     #[serde(default)]
     pub inject_switch_message: bool,
+
+    /// 定时刷新账号额度
+    #[serde(default)]
+    pub quota_refresh_enabled: bool,
+
+    /// 每个账号刷新间隔（分钟）
+    #[serde(default = "default_quota_refresh_interval")]
+    pub quota_refresh_interval: u32,
+
+    /// 每轮刷新几个账号
+    #[serde(default = "default_quota_refresh_batch")]
+    pub quota_refresh_batch: u32,
 }
 
 fn default_theme_palette() -> String {
@@ -97,6 +109,14 @@ fn default_proxy_port() -> u16 {
     18080
 }
 
+fn default_quota_refresh_interval() -> u32 {
+    5
+}
+
+fn default_quota_refresh_batch() -> u32 {
+    1
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -115,6 +135,9 @@ impl Default for AppSettings {
             proxy_free_guard: 0,
             notify_on_switch: false,
             inject_switch_message: false,
+            quota_refresh_enabled: false,
+            quota_refresh_interval: default_quota_refresh_interval(),
+            quota_refresh_batch: default_quota_refresh_batch(),
         }
     }
 }

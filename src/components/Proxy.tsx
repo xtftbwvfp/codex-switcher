@@ -29,6 +29,9 @@ interface AppSettings {
     proxy_free_guard: number;
     notify_on_switch: boolean;
     inject_switch_message: boolean;
+    quota_refresh_enabled: boolean;
+    quota_refresh_interval: number;
+    quota_refresh_batch: number;
 }
 
 export function Proxy() {
@@ -250,6 +253,72 @@ export function Proxy() {
                         </button>
                     </div>
                 </div>
+            </div>
+
+            {/* 定时额度刷新 */}
+            <div className="settings-section">
+                <h3>定时额度刷新</h3>
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">自动刷新账号额度</span>
+                        <span className="setting-desc">按最后更新时间排序，自动循环刷新所有账号的配额数据</span>
+                    </div>
+                    <label className="toggle">
+                        <input
+                            type="checkbox"
+                            checked={settings?.quota_refresh_enabled ?? false}
+                            onChange={async e => {
+                                if (!settings) return;
+                                const updated = { ...settings, quota_refresh_enabled: e.target.checked };
+                                setSettings(updated);
+                                await invoke('update_settings', { settings: updated });
+                            }}
+                        />
+                        <span className="toggle-slider"></span>
+                    </label>
+                </div>
+                {settings?.quota_refresh_enabled && (
+                    <>
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">刷新间隔（分钟/账号）</span>
+                                <span className="setting-desc">每个账号之间的刷新间隔</span>
+                            </div>
+                            <input
+                                type="number"
+                                className="number-input"
+                                min={1}
+                                max={60}
+                                value={settings.quota_refresh_interval}
+                                onChange={async e => {
+                                    const val = parseInt(e.target.value) || 5;
+                                    const updated = { ...settings, quota_refresh_interval: val };
+                                    setSettings(updated);
+                                    await invoke('update_settings', { settings: updated });
+                                }}
+                            />
+                        </div>
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">每轮刷新账号数</span>
+                                <span className="setting-desc">每轮循环刷新多少个账号</span>
+                            </div>
+                            <input
+                                type="number"
+                                className="number-input"
+                                min={1}
+                                max={10}
+                                value={settings.quota_refresh_batch}
+                                onChange={async e => {
+                                    const val = parseInt(e.target.value) || 1;
+                                    const updated = { ...settings, quota_refresh_batch: val };
+                                    setSettings(updated);
+                                    await invoke('update_settings', { settings: updated });
+                                }}
+                            />
+                        </div>
+                    </>
+                )}
             </div>
 
             {/* 通知设置 */}

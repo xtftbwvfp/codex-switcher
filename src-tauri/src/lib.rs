@@ -70,6 +70,7 @@ pub struct AppState {
     /// 切号时通知所有 WebSocket 连接断开重连
     pub ws_disconnect: std::sync::Arc<tokio::sync::Notify>,
     pub switch_logger: std::sync::Arc<switch_log::SwitchLogger>,
+    pub quota_refresh_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub refresh_locks: RefreshLockManager,
     quarantine_fix_ticket: std::sync::Mutex<Option<QuarantineFixTicket>>,
 }
@@ -84,6 +85,7 @@ impl AppState {
             token_tracker: token_tracker::TokenTracker::new(),
             ws_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
             switch_logger: switch_log::SwitchLogger::new(),
+            quota_refresh_handle: std::sync::Mutex::new(None),
             refresh_locks: RefreshLockManager::default(),
             quarantine_fix_ticket: std::sync::Mutex::new(None),
         }
@@ -192,11 +194,12 @@ fn update_settings(
     app: tauri::AppHandle,
     settings: account::AppSettings,
 ) -> Result<(), String> {
-    let (prev_bg_refresh, prev_proxy_enabled) = {
+    let (prev_bg_refresh, prev_proxy_enabled, prev_quota_refresh) = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let prev = (
             store.settings.background_refresh,
             store.settings.proxy_enabled,
+            store.settings.quota_refresh_enabled,
         );
         store.settings = settings.clone();
         store.save()?;
@@ -245,6 +248,25 @@ fn update_settings(
             if let Some(handle) = proxy_handle.take() {
                 handle.abort();
                 println!("[Proxy] 代理已停止");
+            }
+        }
+        _ => {}
+    }
+
+    // 定时额度刷新生命周期
+    let mut qr_handle = state.quota_refresh_handle.lock().map_err(|e| e.to_string())?;
+    match (prev_quota_refresh, settings.quota_refresh_enabled) {
+        (false, true) => {
+            if qr_handle.is_none() {
+                let handle = start_quota_refresh(state.store.clone(), app.clone());
+                *qr_handle = Some(handle);
+                println!("[QuotaRefresh] 定时额度刷新已启动");
+            }
+        }
+        (true, false) => {
+            if let Some(handle) = qr_handle.take() {
+                handle.abort();
+                println!("[QuotaRefresh] 定时额度刷新已停止");
             }
         }
         _ => {}
@@ -632,6 +654,153 @@ async fn switch_account(
 /// 预测下一个拟切换的账号信息 (仅基于缓存，不发起网络请求)
 /// 共享评分选号算法：基于 CachedQuota 的 reset_at 时间戳和剩余额度评分
 /// 返回 (account_id, account_name, score) 按得分从高到低排序
+/// 启动定时额度刷新调度器
+pub fn start_quota_refresh(
+    store: std::sync::Arc<std::sync::Mutex<AccountStore>>,
+    app_handle: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        println!("[QuotaRefresh] 定时额度刷新已启动");
+
+        loop {
+            let (enabled, interval_minutes, batch_size) = {
+                let s = store.lock().unwrap();
+                (
+                    s.settings.quota_refresh_enabled,
+                    s.settings.quota_refresh_interval.max(1),
+                    s.settings.quota_refresh_batch.max(1),
+                )
+            };
+
+            if !enabled {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                continue;
+            }
+
+            // 按 cached_quota.updated_at 排序，最旧的优先
+            let targets: Vec<(String, String)> = {
+                let s = store.lock().unwrap();
+                let mut accounts: Vec<_> = s.accounts.values()
+                    .filter(|a| !a.is_banned && !a.is_token_invalid)
+                    .map(|a| {
+                        let updated = a.cached_quota.as_ref()
+                            .map(|q| q.updated_at)
+                            .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
+                        (a.id.clone(), a.name.clone(), updated)
+                    })
+                    .collect();
+                // 最旧的排前面
+                accounts.sort_by_key(|(_, _, t)| *t);
+                accounts.into_iter()
+                    .take(batch_size as usize)
+                    .map(|(id, name, _)| (id, name))
+                    .collect()
+            };
+
+            for (id, name) in &targets {
+                println!("[QuotaRefresh] 刷新 {} ...", name);
+
+                let (at, aid, rt) = {
+                    let s = store.lock().unwrap();
+                    let acc = match s.accounts.get(id) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    (
+                        AccountStore::extract_access_token(&acc.auth_json),
+                        AccountStore::extract_account_id(&acc.auth_json),
+                        acc.refresh_token.clone(),
+                    )
+                };
+
+                // 没有 access_token 先用 refresh_token 换
+                let access_token = match at {
+                    Some(t) => t,
+                    None => {
+                        if let Some(ref rt_val) = rt {
+                            match crate::oauth::refresh_access_token(rt_val).await {
+                                Ok(res) => {
+                                    if let Ok(mut s) = store.lock() {
+                                        if let Some(acc) = s.accounts.get_mut(id) {
+                                            AccountStore::apply_refreshed_tokens(
+                                                acc,
+                                                res.access_token.clone(),
+                                                res.refresh_token.clone(),
+                                                res.id_token,
+                                                res.expires_in,
+                                            );
+                                            let _ = s.save();
+                                        }
+                                    }
+                                    res.access_token
+                                }
+                                Err(e) => {
+                                    println!("[QuotaRefresh] {} token 刷新失败: {}", name, e);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+
+                match usage::UsageFetcher::fetch_usage_direct(access_token, aid, rt, false).await {
+                    Ok((usage, _)) => {
+                        if let Ok(mut s) = store.lock() {
+                            if let Some(acc) = s.accounts.get_mut(id) {
+                                acc.cached_quota = Some(account::CachedQuota {
+                                    five_hour_left: usage.five_hour_left as f64,
+                                    five_hour_reset: usage.five_hour_reset.clone(),
+                                    five_hour_reset_at: usage.five_hour_reset_at,
+                                    five_hour_label: usage.five_hour_label.clone(),
+                                    weekly_left: usage.weekly_left as f64,
+                                    weekly_reset: usage.weekly_reset.clone(),
+                                    weekly_reset_at: usage.weekly_reset_at,
+                                    weekly_label: usage.weekly_label.clone(),
+                                    plan_type: usage.plan_type.clone(),
+                                    is_valid_for_cli: usage.is_valid_for_cli,
+                                    updated_at: chrono::Utc::now(),
+                                });
+                                let _ = s.save();
+                            }
+                        }
+                        println!("[QuotaRefresh] {} → 5h:{}% 周:{}%", name, usage.five_hour_left, usage.weekly_left);
+                        let _ = app_handle.emit("accounts-updated", ());
+                    }
+                    Err(e) => {
+                        println!("[QuotaRefresh] {} 额度查询失败: {}", name, e);
+                        // 封号/失效标记
+                        if e.contains("ACCOUNT_BANNED") {
+                            if let Ok(mut s) = store.lock() {
+                                if let Some(acc) = s.accounts.get_mut(id) {
+                                    acc.is_banned = true;
+                                    let _ = s.save();
+                                }
+                            }
+                        } else if e.contains("TOKEN_INVALID") {
+                            if let Ok(mut s) = store.lock() {
+                                if let Some(acc) = s.accounts.get_mut(id) {
+                                    acc.is_token_invalid = true;
+                                    let _ = s.save();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 每个号之间间隔 interval_minutes 分钟
+                tokio::time::sleep(tokio::time::Duration::from_secs(u64::from(interval_minutes) * 60)).await;
+            }
+
+            // 如果没有目标，等一轮
+            if targets.is_empty() {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            }
+        }
+    })
+}
+
 pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f64)> {
     let current_id = store.current.as_deref().unwrap_or("");
     let allow_free = store.settings.allow_auto_switch_to_free;
@@ -1519,6 +1688,18 @@ pub fn run() {
                 println!("[Proxy] 代理已随应用启动 (端口 {})", proxy_port);
             } else {
                 println!("[Proxy] 本地代理未开启，跳过启动");
+            }
+
+            // 启动定时额度刷新
+            let quota_refresh_enabled = state
+                .store
+                .lock()
+                .map(|s| s.settings.quota_refresh_enabled)
+                .unwrap_or(false);
+            if quota_refresh_enabled {
+                let handle = start_quota_refresh(state.store.clone(), app.handle().clone());
+                let mut qr = state.quota_refresh_handle.lock().unwrap();
+                *qr = Some(handle);
             }
 
             Ok(())
