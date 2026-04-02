@@ -166,10 +166,7 @@ fn get_current_token(state: &ProxyState) -> Result<(String, bool), String> {
         }
     }
 
-    let account = store
-        .accounts
-        .get(&current_id)
-        .ok_or("当前账号不存在")?;
+    let account = store.accounts.get(&current_id).ok_or("当前账号不存在")?;
 
     let token = AccountStore::extract_access_token(&account.auth_json)
         .ok_or_else(|| "当前账号缺少 access_token".to_string())?;
@@ -186,9 +183,7 @@ fn get_upstream(is_chatgpt: bool, path_and_query: &str) -> (String, &'static str
         // 客户端路径: /v1/responses (因为 OPENAI_BASE_URL 带 /v1)
         // ChatGPT 上游: /backend-api/codex/responses (不含 /v1)
         // 需要去掉 /v1 前缀
-        let path = path_and_query
-            .strip_prefix("/v1")
-            .unwrap_or(path_and_query);
+        let path = path_and_query.strip_prefix("/v1").unwrap_or(path_and_query);
         let url = format!("{}{}", CHATGPT_ORIGIN, path);
         (url, CHATGPT_HOST)
     } else {
@@ -210,7 +205,11 @@ enum PickResult {
 fn pick_next_account(state: &ProxyState) -> PickResult {
     let store = match state.store.lock() {
         Ok(s) => s,
-        Err(_) => return PickResult::Exhausted { earliest_reset: None },
+        Err(_) => {
+            return PickResult::Exhausted {
+                earliest_reset: None,
+            }
+        }
     };
 
     let candidates = crate::score_candidate_accounts(&store);
@@ -220,14 +219,19 @@ fn pick_next_account(state: &ProxyState) -> PickResult {
         let mut earliest: Option<i64> = None;
         for account in store.accounts.values() {
             if let Some(q) = &account.cached_quota {
-                for r in [q.five_hour_reset_at, q.weekly_reset_at].into_iter().flatten() {
+                for r in [q.five_hour_reset_at, q.weekly_reset_at]
+                    .into_iter()
+                    .flatten()
+                {
                     if now < r {
                         earliest = Some(earliest.map_or(r, |e: i64| e.min(r)));
                     }
                 }
             }
         }
-        return PickResult::Exhausted { earliest_reset: earliest };
+        return PickResult::Exhausted {
+            earliest_reset: earliest,
+        };
     }
 
     let (id, _, _) = &candidates[0];
@@ -240,7 +244,9 @@ fn pick_next_account(state: &ProxyState) -> PickResult {
         }
     }
 
-    PickResult::Exhausted { earliest_reset: None }
+    PickResult::Exhausted {
+        earliest_reset: None,
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -267,7 +273,18 @@ fn should_preemptive_switch(state: &ProxyState) -> bool {
         Some(id) => id,
         None => return false,
     };
-    let quota = match store.accounts.get(current_id).and_then(|a| a.cached_quota.as_ref()) {
+
+    let account = match store.accounts.get(current_id) {
+        Some(a) => a,
+        None => return false,
+    };
+
+    if account.is_banned || account.is_token_invalid || account.is_logged_out {
+        println!("[Proxy] 发现当前账号被封禁/失效/登出，触发预防性切号");
+        return true;
+    }
+
+    let quota = match account.cached_quota.as_ref() {
         Some(q) => q,
         None => return false,
     };
@@ -276,11 +293,17 @@ fn should_preemptive_switch(state: &ProxyState) -> bool {
     let is_free = plan == "free" || plan == "unknown";
 
     if is_free && fg > 0.0 && quota.five_hour_left < fg {
-        println!("[Proxy] Free 保护线触发: {:.0}% < {:.0}%", quota.five_hour_left, fg);
+        println!(
+            "[Proxy] Free 保护线触发: {:.0}% < {:.0}%",
+            quota.five_hour_left, fg
+        );
         return true;
     }
     if t5h > 0.0 && quota.five_hour_left < t5h {
-        println!("[Proxy] 5h 阈值触发: {:.0}% < {:.0}%", quota.five_hour_left, t5h);
+        println!(
+            "[Proxy] 5h 阈值触发: {:.0}% < {:.0}%",
+            quota.five_hour_left, t5h
+        );
         return true;
     }
     if tw > 0.0 && quota.weekly_left < tw {
@@ -347,8 +370,14 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
 
     // 记录切号前的账号信息
-    let from_name = store.current.as_ref().and_then(|id| store.accounts.get(id)).map(|a| a.name.clone());
-    let from_quota = store.current.as_ref()
+    let from_name = store
+        .current
+        .as_ref()
+        .and_then(|id| store.accounts.get(id))
+        .map(|a| a.name.clone());
+    let from_quota = store
+        .current
+        .as_ref()
         .and_then(|id| store.accounts.get(id))
         .and_then(|a| a.cached_quota.as_ref())
         .map(|q| q.five_hour_left);
@@ -356,15 +385,27 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
     store.switch_to(new_id)?;
     store.save()?;
 
-    let to_name = store.accounts.get(new_id).map(|a| a.name.clone()).unwrap_or_default();
-    let to_quota = store.accounts.get(new_id)
+    let to_name = store
+        .accounts
+        .get(new_id)
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+    let to_quota = store
+        .accounts
+        .get(new_id)
         .and_then(|a| a.cached_quota.as_ref())
         .map(|q| q.five_hour_left);
 
     println!("[Proxy] 自动切号 → {} ({})", to_name, reason);
 
     // 记录切号日志
-    state.switch_logger.log_switch(from_name.clone(), to_name.clone(), reason, from_quota, to_quota);
+    state.switch_logger.log_switch(
+        from_name.clone(),
+        to_name.clone(),
+        reason,
+        from_quota,
+        to_quota,
+    );
 
     state.stats.auto_switches.fetch_add(1, Ordering::Relaxed);
     state.ws_disconnect.notify_waiters();
@@ -477,7 +518,12 @@ async fn handle_request(
 
     // 5. 首次转发
     let upstream_resp = match forward_with_token(
-        &state, &method, &upstream_url, &base_headers, &body_bytes, &token,
+        &state,
+        &method,
+        &upstream_url,
+        &base_headers,
+        &body_bytes,
+        &token,
     )
     .await
     {
@@ -507,12 +553,89 @@ async fn handle_request(
             println!("[Proxy] 封号检测触发，标记并切号...");
             mark_current_banned(&state);
 
-            if let Some(resp) = try_switch_and_retry(
-                &state, &method, &upstream_url, &base_headers, &body_bytes,
-            )
-            .await
+            if let Some(resp) =
+                try_switch_and_retry(&state, &method, &upstream_url, &base_headers, &body_bytes)
+                    .await
             {
                 return Ok(resp);
+            }
+        } else {
+            // 401 且未封号，可能是正常过期或被登出。
+            println!("[Proxy] 拦截到 401，尝试静默刷新 Token...");
+            let rt_opt = {
+                let store = state.store.lock().unwrap();
+                store
+                    .current
+                    .as_ref()
+                    .and_then(|id| store.accounts.get(id))
+                    .and_then(|a| a.refresh_token.clone())
+            };
+
+            if let Some(rt) = rt_opt {
+                match crate::oauth::refresh_access_token(&rt).await {
+                    Ok(new_tokens) => {
+                        println!("[Proxy] 静默刷新 Token 成功，重试请求");
+                        if let Ok(mut store) = state.store.lock() {
+                            if let Some(current_id) = store.current.clone() {
+                                if let Some(acc) = store.accounts.get_mut(&current_id) {
+                                    AccountStore::apply_refreshed_tokens(
+                                        acc,
+                                        new_tokens.access_token.clone(),
+                                        new_tokens.refresh_token.clone(),
+                                        new_tokens.id_token,
+                                        new_tokens.expires_in,
+                                    );
+                                    let _ = store.save();
+                                }
+                            }
+                        }
+                        if let Ok(retry_resp) = forward_with_token(
+                            &state,
+                            &method,
+                            &upstream_url,
+                            &base_headers,
+                            &body_bytes,
+                            &new_tokens.access_token,
+                        )
+                        .await
+                        {
+                            return Ok(build_stream_response(
+                                retry_resp,
+                                Some(state.tracker.clone()),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let lower = e.to_lowercase();
+                        if lower.contains("logged out")
+                            || lower.contains("invalid_grant")
+                            || lower.contains("signed in to another account")
+                        {
+                            println!("[Proxy] 静默刷新失败 (疑似全网登出/登录冲突)，标记为登出并切号: {}", e);
+                            if let Ok(mut store) = state.store.lock() {
+                                if let Some(current_id) = store.current.clone() {
+                                    if let Some(acc) = store.accounts.get_mut(&current_id) {
+                                        acc.is_logged_out = true;
+                                        let _ = store.save();
+                                    }
+                                }
+                            }
+                            if let Some(resp) = try_switch_and_retry(
+                                &state,
+                                &method,
+                                &upstream_url,
+                                &base_headers,
+                                &body_bytes,
+                            )
+                            .await
+                            {
+                                return Ok(resp);
+                            }
+                        } else {
+                            println!("[Proxy] 静默刷新失败 (其他原因): {}", e);
+                        }
+                    }
+                }
             }
         }
 
@@ -534,10 +657,9 @@ async fn handle_request(
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            let result = try_switch_and_retry(
-                &state, &method, &upstream_url, &base_headers, &body_bytes,
-            )
-            .await;
+            let result =
+                try_switch_and_retry(&state, &method, &upstream_url, &base_headers, &body_bytes)
+                    .await;
             state.switching.store(false, Ordering::SeqCst);
 
             if let Some(resp) = result {
@@ -548,11 +670,19 @@ async fn handle_request(
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if let Ok((new_token, _)) = get_current_token(&state) {
                 if let Ok(retry_resp) = forward_with_token(
-                    &state, &method, &upstream_url, &base_headers, &body_bytes, &new_token,
+                    &state,
+                    &method,
+                    &upstream_url,
+                    &base_headers,
+                    &body_bytes,
+                    &new_token,
                 )
                 .await
                 {
-                    return Ok(build_stream_response(retry_resp, Some(state.tracker.clone())));
+                    return Ok(build_stream_response(
+                        retry_resp,
+                        Some(state.tracker.clone()),
+                    ));
                 }
             }
         }
@@ -712,16 +842,14 @@ fn build_stream_response(
 
     // 用 chain 在原始 stream 结束后追加一个"结束信号"
     // 利用 map + 闭包在最后一个 chunk 后触发 usage 解析
-    let stream = raw_stream.map(move |result| {
-        match result {
-            Ok(bytes) => {
-                if let Ok(mut buf) = buf_clone.lock() {
-                    buf.extend_from_slice(&bytes);
-                }
-                Ok(Frame::data(bytes))
+    let stream = raw_stream.map(move |result| match result {
+        Ok(bytes) => {
+            if let Ok(mut buf) = buf_clone.lock() {
+                buf.extend_from_slice(&bytes);
             }
-            Err(e) => Err(e.to_string()),
+            Ok(Frame::data(bytes))
         }
+        Err(e) => Err(e.to_string()),
     });
 
     // 用 chain + once 在流结束后触发解析
@@ -731,13 +859,13 @@ fn build_stream_response(
         if let Some(tracker) = tracker_clone {
             if let Ok(buf) = buf_for_end.lock() {
                 if !buf.is_empty() {
-                    if let Some(usage) =
-                        crate::token_tracker::extract_usage_from_sse(&buf, "")
-                    {
+                    if let Some(usage) = crate::token_tracker::extract_usage_from_sse(&buf, "") {
                         println!(
                             "[Proxy] Token 统计: input={} output={} total={} model={}",
-                            usage.input_tokens, usage.output_tokens,
-                            usage.total_tokens, usage.model
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.total_tokens,
+                            usage.model
                         );
                         tracker.record(usage);
                     }
@@ -794,16 +922,23 @@ async fn handle_websocket(
                 Err(_) => return Ok(error_response(StatusCode::INTERNAL_SERVER_ERROR, "锁失败")),
             };
             if let Some(current_id) = &store.current {
-                store.accounts.get(current_id).and_then(|a| {
-                    a.cached_quota.as_ref().map(|q| {
-                        let is_free = q.plan_type.to_lowercase() == "free";
-                        if is_free {
-                            q.five_hour_left <= 0.0
-                        } else {
-                            q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
+                store
+                    .accounts
+                    .get(current_id)
+                    .and_then(|a| {
+                        if a.is_banned || a.is_token_invalid || a.is_logged_out {
+                            return Some(true);
                         }
+                        a.cached_quota.as_ref().map(|q| {
+                            let is_free = q.plan_type.to_lowercase() == "free";
+                            if is_free {
+                                q.five_hour_left <= 0.0
+                            } else {
+                                q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
+                            }
+                        })
                     })
-                }).unwrap_or(false)
+                    .unwrap_or(false)
             } else {
                 false
             }
@@ -813,26 +948,38 @@ async fn handle_websocket(
             println!("[Proxy] WebSocket 预检：当前账号无额度，尝试切号...");
             // 最多尝试 3 个候选号，查 API 确认有额度才切
             for _attempt in 0..3 {
-                if let PickResult::Found { id, token: new_token } = pick_next_account(&state) {
+                if let PickResult::Found {
+                    id,
+                    token: new_token,
+                } = pick_next_account(&state)
+                {
                     // 查 API 确认候选号是否真的有额度
                     let has_quota = {
                         let (at, aid, rt) = {
                             let store = state.store.lock().map_err(|e| e.to_string()).ok();
                             if let Some(s) = store {
                                 let acc = s.accounts.get(&id);
-                                acc.map(|a| (
-                                    AccountStore::extract_access_token(&a.auth_json),
-                                    AccountStore::extract_account_id(&a.auth_json),
-                                    a.refresh_token.clone(),
-                                )).unwrap_or((None, None, None))
+                                acc.map(|a| {
+                                    (
+                                        AccountStore::extract_access_token(&a.auth_json),
+                                        AccountStore::extract_account_id(&a.auth_json),
+                                        a.refresh_token.clone(),
+                                    )
+                                })
+                                .unwrap_or((None, None, None))
                             } else {
                                 (None, None, None)
                             }
                         };
                         if let Some(access_token) = at {
                             match crate::usage::UsageFetcher::fetch_usage_direct(
-                                access_token, aid, rt, false
-                            ).await {
+                                access_token,
+                                aid,
+                                rt,
+                                false,
+                            )
+                            .await
+                            {
                                 Ok((usage, _)) => {
                                     // 更新缓存
                                     if let Ok(mut store) = state.store.lock() {
@@ -898,15 +1045,16 @@ async fn handle_websocket(
         .replacen("http://", "ws://", 1);
 
     // 2. 构建上游 WebSocket 请求（透明 header 转发 + token 注入）
-    let mut upstream_req: tungstenite::http::Request<()> = match ws_url.as_str().into_client_request() {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("WebSocket 请求构建失败: {}", e),
-            ))
-        }
-    };
+    let mut upstream_req: tungstenite::http::Request<()> =
+        match ws_url.as_str().into_client_request() {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("WebSocket 请求构建失败: {}", e),
+                ))
+            }
+        };
 
     // 转发客户端 header（排除 WebSocket 握手专用 header，由 into_client_request 生成）
     for (name, value) in req.headers() {
@@ -923,7 +1071,9 @@ async fn handle_websocket(
         ) {
             continue;
         }
-        upstream_req.headers_mut().insert(name.clone(), value.clone());
+        upstream_req
+            .headers_mut()
+            .insert(name.clone(), value.clone());
     }
 
     // 注入 token
@@ -933,18 +1083,71 @@ async fn handle_websocket(
             .insert(hyper::header::AUTHORIZATION, auth_val);
     }
 
-    // 3. 连接上游 WebSocket
-    let (upstream_ws, upstream_handshake_resp) =
-        match tokio_tungstenite::connect_async(upstream_req).await {
-            Ok(conn) => conn,
-            Err(e) => {
+    // 3. 连接上游 WebSocket（认证失败时自动切号重连）
+    let connect_result = tokio_tungstenite::connect_async(upstream_req).await;
+
+    let (upstream_ws, upstream_handshake_resp) = match connect_result {
+        Ok(conn) => conn,
+        Err(e) => {
+            let err_lower = e.to_string().to_lowercase();
+            let is_auth_err = err_lower.contains("401")
+                || err_lower.contains("403")
+                || err_lower.contains("unauthorized")
+                || err_lower.contains("forbidden");
+
+            if !is_auth_err {
                 eprintln!("[Proxy] WebSocket 上游连接失败: {}", e);
                 return Ok(error_response(
                     StatusCode::BAD_GATEWAY,
                     &format!("WebSocket 上游连接失败: {}", e),
                 ));
             }
-        };
+
+            println!("[Proxy] WebSocket 认证失败 ({}), 尝试切号重连...", e);
+            mark_current_quota_depleted(&state);
+
+            // 切号重连，最多试 3 个号
+            let mut retry_conn = None;
+            for _attempt in 0..3 {
+                if let PickResult::Found { id, token: new_tok } = pick_next_account(&state) {
+                    if do_switch(&state, &id, SwitchReason::WebSocketPrecheck).is_err() {
+                        continue;
+                    }
+                    let new_chatgpt = new_tok.starts_with("eyJ");
+                    let (new_url, _) = get_upstream(new_chatgpt, &path);
+                    let ws = new_url.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
+
+                    if let Ok(mut r) = ws.as_str().into_client_request() {
+                        for (n, v) in req.headers() {
+                            let l = n.as_str().to_lowercase();
+                            if matches!(l.as_str(), "authorization"|"host"|"upgrade"|"connection"|"sec-websocket-key"|"sec-websocket-version"|"sec-websocket-extensions") { continue; }
+                            r.headers_mut().insert(n.clone(), v.clone());
+                        }
+                        if let Ok(av) = HeaderValue::from_str(&format!("Bearer {}", new_tok)) {
+                            r.headers_mut().insert(hyper::header::AUTHORIZATION, av);
+                        }
+                        if let Ok(c) = tokio_tungstenite::connect_async(r).await {
+                            println!("[Proxy] WebSocket 切号重连成功");
+                            retry_conn = Some(c);
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            match retry_conn {
+                Some(conn) => conn,
+                None => {
+                    return Ok(error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "所有账号 WebSocket 连接均失败",
+                    ));
+                }
+            }
+        }
+    };
 
     println!("[Proxy] WebSocket 上游已连接");
 
@@ -973,8 +1176,12 @@ async fn handle_websocket(
         let lower = name.as_str().to_lowercase();
         if matches!(
             lower.as_str(),
-            "upgrade" | "connection" | "sec-websocket-accept" | "sec-websocket-extensions"
-                | "content-length" | "transfer-encoding"
+            "upgrade"
+                | "connection"
+                | "sec-websocket-accept"
+                | "sec-websocket-extensions"
+                | "content-length"
+                | "transfer-encoding"
         ) {
             continue;
         }
@@ -993,13 +1200,12 @@ async fn handle_websocket(
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
-                let mut client_ws =
-                    tokio_tungstenite::WebSocketStream::from_raw_socket(
-                        io,
-                        tungstenite::protocol::Role::Server,
-                        None,
-                    )
-                    .await;
+                let mut client_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                    io,
+                    tungstenite::protocol::Role::Server,
+                    None,
+                )
+                .await;
 
                 println!("[Proxy] WebSocket 客户端已升级，开始桥接");
 
@@ -1013,7 +1219,8 @@ async fn handle_websocket(
                     let _ = futures_util::SinkExt::send(
                         &mut client_ws,
                         tungstenite::Message::Text(inject_json.to_string().into()),
-                    ).await;
+                    )
+                    .await;
                     println!("[Proxy] 已注入切号通知到 WebSocket");
                 }
 
@@ -1128,8 +1335,7 @@ async fn bridge_websockets<S1, S2>(
     upstream: S2,
     disconnect: Arc<tokio::sync::Notify>,
     state: Arc<ProxyState>,
-)
-where
+) where
     S1: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
         + futures_util::Sink<tungstenite::Message, Error = tungstenite::Error>
         + Unpin,
@@ -1164,7 +1370,9 @@ where
                 Ok(msg) => {
                     // 检测限额错误（仅解析 response.failed 类型）
                     if detect_ws_rate_limit(&msg) {
-                        println!("[Proxy] WebSocket 检测到限额错误（response.failed），触发切号...");
+                        println!(
+                            "[Proxy] WebSocket 检测到限额错误（response.failed），触发切号..."
+                        );
                         mark_current_quota_depleted(&state_clone);
                         let _ = client_write.send(msg).await;
                         if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {

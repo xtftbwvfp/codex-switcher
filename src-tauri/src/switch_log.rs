@@ -15,6 +15,8 @@ pub enum SwitchReason {
     WebSocketPrecheck,
     WebSocketRateLimit,
     BannedDetected,
+    AutoQuotaRefresh,
+    BackgroundKeepalive,
 }
 
 impl std::fmt::Display for SwitchReason {
@@ -26,6 +28,8 @@ impl std::fmt::Display for SwitchReason {
             SwitchReason::WebSocketPrecheck => write!(f, "WS 预检"),
             SwitchReason::WebSocketRateLimit => write!(f, "WS 限额"),
             SwitchReason::BannedDetected => write!(f, "封号检测"),
+            SwitchReason::AutoQuotaRefresh => write!(f, "自动刷新"),
+            SwitchReason::BackgroundKeepalive => write!(f, "后台保活"),
         }
     }
 }
@@ -77,10 +81,7 @@ impl SwitchLogger {
 
         println!(
             "[SwitchLog] {} → {} ({})",
-            event
-                .from_account
-                .as_deref()
-                .unwrap_or("无"),
+            event.from_account.as_deref().unwrap_or("无"),
             event.to_account,
             event.reason
         );

@@ -81,16 +81,28 @@ impl UsageFetcher {
         // 如果允许本地刷新，且 401/403 且有 refresh_token，尝试刷新
         if allow_local_refresh && (status == 401 || status == 403) && refresh_token.is_some() {
             if let Some(ref rt) = refresh_token {
-                if let Ok(token_res) = crate::oauth::refresh_access_token(rt).await {
-                    current_token = token_res.access_token.clone();
-                    new_tokens = Some(token_res);
+                match crate::oauth::refresh_access_token(rt).await {
+                    Ok(token_res) => {
+                        current_token = token_res.access_token.clone();
+                        new_tokens = Some(token_res);
 
-                    // 重试请求
-                    response = build_request(&current_token, &account_id)
-                        .send()
-                        .await
-                        .map_err(|e| format!("刷新后重试失败: {}", e))?;
-                    status = response.status();
+                        // 重试请求
+                        response = build_request(&current_token, &account_id)
+                            .send()
+                            .await
+                            .map_err(|e| format!("刷新后重试失败: {}", e))?;
+                        status = response.status();
+                    }
+                    Err(e) => {
+                        let lower = e.to_lowercase();
+                        if lower.contains("logged out")
+                            || lower.contains("signed in to another account")
+                            || lower.contains("invalid_grant")
+                        {
+                            return Err("ACCOUNT_LOGGED_OUT:您已登出或登录了其他账号，请重新登录"
+                                .to_string());
+                        }
+                    }
                 }
             }
         }

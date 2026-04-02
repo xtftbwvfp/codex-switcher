@@ -17,6 +17,7 @@ interface AccountInfo {
     name: string;
     is_banned: boolean;
     is_token_invalid: boolean;
+    is_logged_out: boolean;
     cached_quota: QuotaInfo | null;
 }
 
@@ -93,6 +94,7 @@ export function TrayPopup() {
                     name: account.name,
                     is_banned: account.is_banned,
                     is_token_invalid: account.is_token_invalid,
+                    is_logged_out: account.is_logged_out,
                     cached_quota: account.cached_quota,
                 } : null,
                 proxy,
@@ -175,7 +177,8 @@ export function TrayPopup() {
                     {data.account.name}
                     <span className="tp-plan">{q?.plan_type || '-'}</span>
                     {data.account.is_banned && <span className="tp-banned">封号</span>}
-                    {data.account.is_token_invalid && !data.account.is_banned && <span className="tp-invalid">失效</span>}
+                    {data.account.is_logged_out && !data.account.is_banned && <span className="tp-logged-out">登出</span>}
+                    {data.account.is_token_invalid && !data.account.is_banned && !data.account.is_logged_out && <span className="tp-invalid">失效</span>}
                 </div>
             )}
 

@@ -50,6 +50,7 @@ export interface Account {
     keepalive: KeepaliveState;
     is_banned: boolean;
     is_token_invalid: boolean;
+    is_logged_out: boolean;
 }
 
 export function useAccounts() {

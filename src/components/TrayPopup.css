@@ -95,13 +95,24 @@ body.is-tray-popup,
     font-weight: 600;
 }
 
-.tp-banned {
+.tp-banned,
+.tp-invalid,
+.tp-logged-out {
     font-size: 9px;
     padding: 1px 5px;
     border-radius: 3px;
+    font-weight: 700;
+}
+
+.tp-banned,
+.tp-invalid {
     background: rgba(239, 68, 68, 0.2);
     color: #f87171;
-    font-weight: 700;
+}
+
+.tp-logged-out {
+    background: rgba(245, 158, 11, 0.2);
+    color: #f59e0b;
 }
 
 /* ===== 卡片网格 ===== */

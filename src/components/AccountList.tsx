@@ -4,6 +4,7 @@ import { Account, AppSettings } from '../hooks/useAccounts';
 import { invoke } from '@tauri-apps/api/core';
 import { useShortCountdown } from '../hooks/useCountdown';
 import './AccountList.css';
+import { ConfirmModal } from './ConfirmModal';
 
 interface UsageData {
     five_hour_left: number;
@@ -51,6 +52,7 @@ export function AccountList({
     const [filter, setFilter] = useState<FilterType>('all');
     const [invalidIds, setInvalidIds] = useState<Set<string>>(new Set());
     const [bannedIds, setBannedIds] = useState<Set<string>>(new Set());
+    const [accountToDelete, setAccountToDelete] = useState<{ id: string, name: string } | null>(null);
 
     const autoReload = settings.auto_reload_ide;
     const setAutoReload = (val: boolean) => onUpdateSettings({ ...settings, auto_reload_ide: val });
@@ -72,7 +74,7 @@ export function AccountList({
             if (acc.is_banned) {
                 initialBanned.add(acc.id);
                 initialInvalids.add(acc.id);
-            } else if (acc.is_token_invalid) {
+            } else if (acc.is_token_invalid || acc.is_logged_out) {
                 initialInvalids.add(acc.id);
             }
             if (acc.cached_quota) {
@@ -149,9 +151,9 @@ export function AccountList({
         const err = account.keepalive?.last_error;
         const isPermanent = err?.toLowerCase().match(/reused|invalidated|expired/);
 
+        if (isPermanent) return { text: '过期', warn: true };
         if (isCurrent) return { text: '当前账号', warn: false };
         if (!enabled) return { text: '已停用', warn: true };
-        if (isPermanent) return { text: '需重登', warn: true };
         return { text: err ? '重试中' : '已启用', warn: !!err };
     };
 
@@ -263,13 +265,16 @@ export function AccountList({
                     {filteredAccounts.map(acc => {
                         const usage = usageMap[acc.id];
                         const status = getStatusInfo(acc);
-                        const isInvalid = invalidIds.has(acc.id);
+                        const err = acc.keepalive?.last_error;
+                        const isPermanentError = err?.toLowerCase().match(/reused|invalidated|expired/);
+                        const isInvalid = invalidIds.has(acc.id) || !!isPermanentError || acc.is_token_invalid || acc.is_logged_out;
                         const isBanned = bannedIds.has(acc.id);
+                        const isLoggedOut = acc.is_logged_out;
                         const isCurrent = acc.id === currentId;
                         const isRefreshing = refreshingIds.has(acc.id);
 
                         return (
-                            <div key={acc.id} className={`account-row ${isCurrent ? 'current' : ''} ${selectedIds.has(acc.id) ? 'selected' : ''} ${isBanned ? 'banned' : isInvalid ? 'invalid' : ''}`}>
+                            <div key={acc.id} className={`account-row ${isCurrent ? 'current' : ''} ${selectedIds.has(acc.id) ? 'selected' : ''} ${isBanned ? 'banned' : isLoggedOut ? 'logged-out' : isInvalid ? 'expired' : ''}`}>
                                 <div className="col-checkbox">
                                     <input type="checkbox" className="custom-checkbox" checked={selectedIds.has(acc.id)} onChange={() => { const s = new Set(selectedIds); s.has(acc.id) ? s.delete(acc.id) : s.add(acc.id); setSelectedIds(s); }} />
                                 </div>
@@ -279,7 +284,7 @@ export function AccountList({
                                     <div className="badges" style={{ display: 'flex', gap: '4px', marginLeft: '8px' }}>
                                         {copiedId === acc.id && <span className="badge copy-success">已复制</span>}
                                         {isCurrent && <span className="badge current">当前</span>}
-                                        {isBanned ? <span className="badge banned" title="该账号已被 OpenAI 封禁">封号</span> : isInvalid && <span className="badge invalid">失效</span>}
+                                        {isBanned ? <span className="badge banned" title="该账号已被 OpenAI 封禁">封号</span> : isLoggedOut ? <span className="badge logged-out" title="您已登出或登录了其他账号，请重新登录">已登出</span> : isInvalid && <span className="badge expired" title="该账号 Token 已过期或失效">过期</span>}
                                         {usage?.plan_type && <span className="badge plan">{usage.plan_type.toUpperCase()}</span>}
                                     </div>
                                 </div>
@@ -311,7 +316,7 @@ export function AccountList({
                                     {!isCurrent && (
                                         <button className="action-btn switch" onClick={() => onSwitch(acc.id)} disabled={switchingIds.has(acc.id)} title="切换"><ArrowLeftRight size={14} /></button>
                                     )}
-                                    <button className="action-btn delete" onClick={() => onDelete(acc.id)} title="删除"><Trash2 size={14} /></button>
+                                    <button className="action-btn delete" onClick={() => setAccountToDelete({ id: acc.id, name: acc.name })} title="删除"><Trash2 size={14} /></button>
                                 </div>
                             </div>
                         );
@@ -323,6 +328,20 @@ export function AccountList({
                 <span>共 {filteredAccounts.length} 个账号</span>
                 {selectedIds.size > 0 && <span className="selected-info">已选 {selectedIds.size} 个</span>}
             </div>
+
+            <ConfirmModal
+                isOpen={!!accountToDelete}
+                title="确认删除账号"
+                message={<p>确定要永久删除账号 <strong>{accountToDelete?.name}</strong> 吗？<br /><br />此操作不可恢复，删除后有关该账号的本地授权信息将被清除。</p>}
+                confirmText="彻底删除"
+                onConfirm={() => {
+                    if (accountToDelete) {
+                        onDelete(accountToDelete.id);
+                        setAccountToDelete(null);
+                    }
+                }}
+                onCancel={() => setAccountToDelete(null)}
+            />
         </div>
     );
 }

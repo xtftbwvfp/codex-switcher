@@ -174,6 +174,10 @@ pub struct Account {
     /// 该账号授权是否已失效（需重新登录）
     #[serde(default)]
     pub is_token_invalid: bool,
+
+    /// 该账号是否已登出
+    #[serde(default)]
+    pub is_logged_out: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +399,7 @@ impl AccountStore {
             keepalive: KeepaliveState::default(),
             is_banned: false,
             is_token_invalid: false,
+            is_logged_out: false,
         };
 
         self.accounts.insert(id.clone(), account.clone());

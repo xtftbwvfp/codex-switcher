@@ -123,6 +123,10 @@ export function Stats() {
 
     const accountCount = switchStats ? Object.keys(switchStats.by_account).length : 0;
 
+    // 分离常规切号与系统后台任务
+    const actualSwitches = switchHistory.filter(e => e.reason !== '自动刷新' && e.reason !== '后台保活');
+    const systemLogs = switchHistory.filter(e => e.reason === '自动刷新' || e.reason === '后台保活');
+
     return (
         <div className="stats-page">
             <div className="stats-header">
@@ -231,7 +235,7 @@ export function Stats() {
 
             {/* 切号日志 */}
             <div className="stats-section">
-                <h3>切号日志 ({switchHistory.length} 条)</h3>
+                <h3>切号日志 ({actualSwitches.length} 条)</h3>
                 <div className="switch-log-table">
                     <div className="log-header">
                         <span>时间</span>
@@ -239,10 +243,10 @@ export function Stats() {
                         <span>原因</span>
                         <span>使用时长</span>
                     </div>
-                    {switchHistory.length === 0 ? (
+                    {actualSwitches.length === 0 ? (
                         <div className="log-empty">暂无切号记录</div>
                     ) : (
-                        switchHistory.map((e, i) => (
+                        actualSwitches.map((e, i) => (
                             <div key={i} className="log-row">
                                 <span className="log-time">{formatTime(e.timestamp)}</span>
                                 <span className="log-path">
@@ -254,8 +258,8 @@ export function Stats() {
                                 </span>
                                 <span className={`log-reason ${reasonClass(e.reason)}`}>{e.reason}</span>
                                 <span className="log-duration">
-                                    {i < switchHistory.length - 1
-                                        ? formatDuration(switchHistory[i + 1].timestamp, e.timestamp)
+                                    {i < actualSwitches.length - 1
+                                        ? formatDuration(actualSwitches[i + 1].timestamp, e.timestamp)
                                         : '-'}
                                 </span>
                             </div>
@@ -263,6 +267,33 @@ export function Stats() {
                     )}
                 </div>
             </div>
+
+            {/* 后台任务日志 */}
+            {systemLogs.length > 0 && (
+                <div className="stats-section">
+                    <h3>后台任务日志 ({systemLogs.length} 条)</h3>
+                    <div className="switch-log-table">
+                        <div className="log-header">
+                            <span>时间</span>
+                            <span>目标账号</span>
+                            <span>任务类型</span>
+                            <span>刷新后额度</span>
+                        </div>
+                        {systemLogs.map((e, i) => (
+                            <div key={`sys-${i}`} className="log-row">
+                                <span className="log-time">{formatTime(e.timestamp)}</span>
+                                <span className="log-path">
+                                    {shortName(e.to_account)}
+                                </span>
+                                <span className={`log-reason ${reasonClass(e.reason)}`}>{e.reason}</span>
+                                <span className="log-duration" style={{ color: 'var(--success-color, #10b981)' }}>
+                                    {e.to_quota_5h !== null ? `${e.to_quota_5h}%` : '成功'}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -276,5 +307,7 @@ function reasonClass(reason: string): string {
     if (reason.includes('手动')) return 'manual';
     if (reason.includes('429') || reason.includes('限额')) return 'ratelimit';
     if (reason.includes('封号')) return 'banned';
+    if (reason.includes('保活')) return 'keepalive';
+    if (reason.includes('刷新')) return 'refresh';
     return 'auto';
 }

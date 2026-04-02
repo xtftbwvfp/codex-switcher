@@ -254,7 +254,7 @@
     color: white;
 }
 
-.badge.invalid {
+.badge.expired {
     background: rgba(239, 68, 68, 0.2);
     color: #ef4444;
     cursor: help;
@@ -263,6 +263,12 @@
 .badge.banned {
     background: rgba(249, 115, 22, 0.2);
     color: #f97316;
+    cursor: help;
+}
+
+.badge.logged-out {
+    background: rgba(245, 158, 11, 0.2);
+    color: #f59e0b;
     cursor: help;
 }
 
@@ -294,7 +300,7 @@
     }
 }
 
-.account-row.invalid {
+.account-row.expired {
     background: rgba(239, 68, 68, 0.08);
     border-left: 3px solid #ef4444;
 }
@@ -302,6 +308,11 @@
 .account-row.banned {
     background: rgba(249, 115, 22, 0.08);
     border-left: 3px solid #f97316;
+}
+
+.account-row.logged-out {
+    background: rgba(245, 158, 11, 0.08);
+    border-left: 3px solid #f59e0b;
 }
 
 .col-quota-merged {

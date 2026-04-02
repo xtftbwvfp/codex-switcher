@@ -31,6 +31,12 @@ fn is_reused_or_revoked_error(reason: &str) -> bool {
         || lower.contains("refresh_token_expired")
         || lower.contains("deactivated")
         || lower.contains("unauthorized")
+        || lower.contains("invalid_grant")
+}
+
+fn is_logged_out_error(reason: &str) -> bool {
+    let lower = reason.to_lowercase();
+    lower.contains("logged out") || lower.contains("signed in to another account")
 }
 
 /// 启动后台状态同步调度器
@@ -158,14 +164,35 @@ pub fn start(
                         let _ = store.save();
                         store_changed = true;
                         println!("[Scheduler] ✅ 非活跃账号 {} 保活刷新成功", target.name);
+
+                        // 记录后台保活系统日志
+                        use tauri::Manager;
+                        if let Some(logger) =
+                            app_handle.try_state::<Arc<crate::switch_log::SwitchLogger>>()
+                        {
+                            logger.inner().log_switch(
+                                None,
+                                target.name.clone(),
+                                crate::switch_log::SwitchReason::BackgroundKeepalive,
+                                None,
+                                None,
+                            );
+                        }
                     }
                     Err(err) => {
                         let reason = err;
                         let mut store = store.lock().unwrap();
                         store.mark_keepalive_attempt_failed(&target.id, reason.clone());
-                        if is_reused_or_revoked_error(&reason) {
+                        if is_reused_or_revoked_error(&reason) || is_logged_out_error(&reason) {
                             // 风险保护：检测到 reused/revoked 后，自动停用该账号的非活跃保活，避免重复消耗。
                             let _ = store.set_inactive_refresh_enabled(&target.id, false);
+                            if let Some(account) = store.accounts.get_mut(&target.id) {
+                                if is_logged_out_error(&reason) {
+                                    account.is_logged_out = true;
+                                } else {
+                                    account.is_token_invalid = true;
+                                }
+                            }
                         }
                         let _ = store.save();
                         has_failure_event = true;

@@ -254,7 +254,10 @@ fn update_settings(
     }
 
     // 定时额度刷新生命周期
-    let mut qr_handle = state.quota_refresh_handle.lock().map_err(|e| e.to_string())?;
+    let mut qr_handle = state
+        .quota_refresh_handle
+        .lock()
+        .map_err(|e| e.to_string())?;
     match (prev_quota_refresh, settings.quota_refresh_enabled) {
         (false, true) => {
             if qr_handle.is_none() {
@@ -334,7 +337,7 @@ fn delete_account(state: State<AppState>, app: tauri::AppHandle, id: String) -> 
         store.delete_account(&id)?;
         store.save()?;
     } // 锁在这里释放
-    // 联动刷新托盘菜单（需要重新获取锁，不会死锁）
+      // 联动刷新托盘菜单（需要重新获取锁，不会死锁）
     crate::tray::update_tray_menu(&app);
     Ok(())
 }
@@ -684,10 +687,14 @@ pub fn start_quota_refresh(
             // 按 cached_quota.updated_at 排序，最旧的优先
             let targets: Vec<(String, String)> = {
                 let s = store.lock().unwrap();
-                let mut accounts: Vec<_> = s.accounts.values()
-                    .filter(|a| !a.is_banned && !a.is_token_invalid)
+                let mut accounts: Vec<_> = s
+                    .accounts
+                    .values()
+                    .filter(|a| !a.is_banned && !a.is_token_invalid && !a.is_logged_out)
                     .map(|a| {
-                        let updated = a.cached_quota.as_ref()
+                        let updated = a
+                            .cached_quota
+                            .as_ref()
                             .map(|q| q.updated_at)
                             .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC);
                         (a.id.clone(), a.name.clone(), updated)
@@ -695,7 +702,8 @@ pub fn start_quota_refresh(
                     .collect();
                 // 最旧的排前面
                 accounts.sort_by_key(|(_, _, t)| *t);
-                accounts.into_iter()
+                accounts
+                    .into_iter()
                     .take(batch_size as usize)
                     .map(|(id, name, _)| (id, name))
                     .collect()
@@ -769,7 +777,25 @@ pub fn start_quota_refresh(
                                 let _ = s.save();
                             }
                         }
-                        println!("[QuotaRefresh] {} → 5h:{}% 周:{}%", name, usage.five_hour_left, usage.weekly_left);
+                        println!(
+                            "[QuotaRefresh] {} → 5h:{}% 周:{}%",
+                            name, usage.five_hour_left, usage.weekly_left
+                        );
+
+                        // 记录自动刷新额度日志
+                        use tauri::Manager;
+                        if let Some(logger) = app_handle
+                            .try_state::<std::sync::Arc<crate::switch_log::SwitchLogger>>()
+                        {
+                            logger.inner().log_switch(
+                                None,
+                                name.clone(),
+                                crate::switch_log::SwitchReason::AutoQuotaRefresh,
+                                None,
+                                Some(usage.five_hour_left as f64),
+                            );
+                        }
+
                         let _ = app_handle.emit("accounts-updated", ());
                     }
                     Err(e) => {
@@ -786,6 +812,7 @@ pub fn start_quota_refresh(
                             if let Ok(mut s) = store.lock() {
                                 if let Some(acc) = s.accounts.get_mut(id) {
                                     acc.is_token_invalid = true;
+                                    acc.is_logged_out = false;
                                     let _ = s.save();
                                 }
                             }
@@ -794,7 +821,10 @@ pub fn start_quota_refresh(
                 }
 
                 // 每个号之间间隔 interval_minutes 分钟
-                tokio::time::sleep(tokio::time::Duration::from_secs(u64::from(interval_minutes) * 60)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    u64::from(interval_minutes) * 60,
+                ))
+                .await;
             }
 
             // 如果没有目标，等一轮
@@ -813,7 +843,11 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
     let mut scored: Vec<(String, String, f64)> = Vec::new();
 
     for account in store.accounts.values() {
-        if account.id == current_id || account.is_banned || account.is_token_invalid {
+        if account.id == current_id
+            || account.is_banned
+            || account.is_token_invalid
+            || account.is_logged_out
+        {
             continue;
         }
 
@@ -905,9 +939,12 @@ pub async fn switch_to_next_account_internal(
         let quota = match get_quota_internal(&state, target_id.clone()).await {
             Ok(u) => u,
             Err(e) => {
-                // 封号检测
-                if e.contains("ACCOUNT_BANNED") || e.contains("TOKEN_INVALID") {
-                    println!("[SmartSwitch] 账号 {} 已封号，跳过", target_name);
+                // 封号/失效/登出检测
+                if e.contains("ACCOUNT_BANNED")
+                    || e.contains("TOKEN_INVALID")
+                    || e.contains("ACCOUNT_LOGGED_OUT")
+                {
+                    println!("[SmartSwitch] 账号 {} 已封禁/失效/登出，跳过", target_name);
                     continue;
                 }
                 println!(
@@ -990,6 +1027,7 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_banned = true;
                 account.is_token_invalid = false;
+                account.is_logged_out = false;
                 if let Err(e) = store.save() {
                     eprintln!("[Store] 保存失败: {}", e);
                 }
@@ -1001,6 +1039,19 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_token_invalid = true;
                 account.is_banned = false;
+                account.is_logged_out = false;
+                if let Err(e) = store.save() {
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
+            }
+            return Err(e.clone());
+        }
+        if e.contains("ACCOUNT_LOGGED_OUT") {
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            if let Some(account) = store.accounts.get_mut(&id) {
+                account.is_logged_out = true;
+                account.is_banned = false;
+                account.is_token_invalid = false;
                 if let Err(e) = store.save() {
                     eprintln!("[Store] 保存失败: {}", e);
                 }
@@ -1168,6 +1219,7 @@ async fn get_quota_by_id(
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_banned = true;
                 account.is_token_invalid = false;
+                account.is_logged_out = false;
                 if let Err(e) = store.save() {
                     eprintln!("[Store] 保存失败: {}", e);
                 }
@@ -1179,6 +1231,19 @@ async fn get_quota_by_id(
             if let Some(account) = store.accounts.get_mut(&id) {
                 account.is_token_invalid = true;
                 account.is_banned = false;
+                account.is_logged_out = false;
+                if let Err(e) = store.save() {
+                    eprintln!("[Store] 保存失败: {}", e);
+                }
+            }
+            return Err(e.clone());
+        }
+        if e.contains("ACCOUNT_LOGGED_OUT") {
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            if let Some(account) = store.accounts.get_mut(&id) {
+                account.is_logged_out = true;
+                account.is_banned = false;
+                account.is_token_invalid = false;
                 if let Err(e) = store.save() {
                     eprintln!("[Store] 保存失败: {}", e);
                 }
@@ -1789,6 +1854,7 @@ mod tests {
             keepalive: account::KeepaliveState::default(),
             is_banned: false,
             is_token_invalid: false,
+            is_logged_out: false,
         }
     }
 
