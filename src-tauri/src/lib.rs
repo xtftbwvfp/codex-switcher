@@ -1170,30 +1170,15 @@ async fn get_quota_by_id(
     }
 
     // 1. 从 Store 获取该账号的 Token
-    let (access_token, account_id, refresh_token) = {
+    let (access_token_opt, account_id, refresh_token) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         let account = store
             .accounts
             .get(&id)
             .ok_or_else(|| format!("账号 {} 不存在", id))?;
 
-        // 从 auth_json 中提取 access_token 和 account_id
-        let tokens = account
-            .auth_json
-            .get("tokens")
-            .ok_or("账号数据缺少 tokens 字段")?;
-
-        let at = tokens
-            .get("access_token")
-            .and_then(|v| v.as_str())
-            .ok_or("账号数据缺少 access_token")?
-            .to_string();
-
-        let aid = tokens
-            .get("account_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
+        let at = AccountStore::extract_access_token(&account.auth_json);
+        let aid = AccountStore::extract_account_id(&account.auth_json);
         let rt = account
             .refresh_token
             .clone()
@@ -1202,13 +1187,39 @@ async fn get_quota_by_id(
         (at, aid, rt)
     };
 
-    // 2. 直接使用该账号的 Token 获取用量
-    let allow_local_refresh = allow_local_refresh_for_quota(is_current);
+    // 如果没有 access_token，先用 refresh_token 换一个
+    let access_token = if let Some(at) = access_token_opt {
+        at
+    } else if let Some(ref rt) = refresh_token {
+        match crate::oauth::refresh_access_token(rt).await {
+            Ok(token_res) => {
+                let mut store = state.store.lock().map_err(|e| e.to_string())?;
+                if let Some(account) = store.accounts.get_mut(&id) {
+                    AccountStore::apply_refreshed_tokens(
+                        account,
+                        token_res.access_token.clone(),
+                        token_res.refresh_token.clone(),
+                        token_res.id_token,
+                        token_res.expires_in,
+                    );
+                    if let Err(e) = store.save() {
+                        eprintln!("[Store] 保存失败: {}", e);
+                    }
+                }
+                token_res.access_token
+            }
+            Err(e) => return Err(format!("TOKEN_INVALID:刷新 token 失败: {}", e)),
+        }
+    } else {
+        return Err("TOKEN_INVALID:无 access_token 且无 refresh_token".to_string());
+    };
+
+    // 2. 使用 Token 获取用量（允许自动刷新）
     let result = UsageFetcher::fetch_usage_direct(
         access_token,
         account_id,
         refresh_token,
-        allow_local_refresh,
+        true, // 允许 refresh，解决 token 过期问题
     )
     .await;
 
