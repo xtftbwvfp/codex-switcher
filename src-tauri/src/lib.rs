@@ -9,6 +9,7 @@ mod oauth_server;
 mod proxy;
 mod refresh_lock;
 mod scheduler;
+mod skills;
 mod switch_log;
 mod token_tracker;
 mod tray;
@@ -1401,7 +1402,88 @@ fn get_token_history(days: u32) -> Result<Vec<token_tracker::TokenHistoryEntry>,
     Ok(token_tracker::TokenTracker::get_history(days))
 }
 
-/// 获取切号历史
+// ── Skills 管理命令 ──
+
+#[tauri::command]
+fn get_installed_skills() -> Result<Vec<skills::InstalledSkill>, String> {
+    let data = skills::SkillStore::load();
+    Ok(data.skills)
+}
+
+#[tauri::command]
+fn get_skill_repos() -> Result<Vec<skills::SkillRepo>, String> {
+    let data = skills::SkillStore::load();
+    Ok(data.repos)
+}
+
+#[tauri::command]
+fn add_skill_repo(owner: String, name: String, branch: String) -> Result<(), String> {
+    let mut data = skills::SkillStore::load();
+    if data.repos.iter().any(|r| r.owner == owner && r.name == name) {
+        return Err("仓库已存在".into());
+    }
+    data.repos.push(skills::SkillRepo { owner, name, branch, enabled: true });
+    skills::SkillStore::save(&data)
+}
+
+#[tauri::command]
+fn remove_skill_repo(owner: String, name: String) -> Result<(), String> {
+    let mut data = skills::SkillStore::load();
+    data.repos.retain(|r| !(r.owner == owner && r.name == name));
+    skills::SkillStore::save(&data)
+}
+
+#[tauri::command]
+async fn discover_skills() -> Result<Vec<skills::DiscoverableSkill>, String> {
+    let data = skills::SkillStore::load();
+    let mut discovered = skills::SkillStore::discover_skills(&data.repos).await;
+    // 标记已安装的
+    let installed_dirs: std::collections::HashSet<String> = data.skills.iter().map(|s| s.directory.clone()).collect();
+    for s in &mut discovered {
+        s.installed = installed_dirs.contains(&s.directory);
+    }
+    Ok(discovered)
+}
+
+#[tauri::command]
+async fn install_skill(skill_json: String) -> Result<(), String> {
+    let skill: skills::DiscoverableSkill = serde_json::from_str(&skill_json).map_err(|e| e.to_string())?;
+    let mut data = skills::SkillStore::load();
+    skills::SkillStore::install_skill(&mut data, &skill).await?;
+    skills::SkillStore::save(&data)
+}
+
+#[tauri::command]
+fn uninstall_skill(skill_id: String) -> Result<(), String> {
+    let mut data = skills::SkillStore::load();
+    skills::SkillStore::uninstall_skill(&mut data, &skill_id)?;
+    skills::SkillStore::save(&data)
+}
+
+#[tauri::command]
+fn toggle_skill_app(skill_id: String, app: String, enabled: bool) -> Result<(), String> {
+    let mut data = skills::SkillStore::load();
+    skills::SkillStore::toggle_app(&mut data, &skill_id, &app, enabled)?;
+    skills::SkillStore::save(&data)
+}
+
+#[tauri::command]
+fn scan_and_import_skills() -> Result<usize, String> {
+    let mut data = skills::SkillStore::load();
+    let count = skills::SkillStore::scan_existing(&mut data);
+    if count > 0 {
+        skills::SkillStore::save(&data)?;
+    }
+    Ok(count)
+}
+
+#[tauri::command]
+fn sync_all_skills() -> Result<(), String> {
+    let data = skills::SkillStore::load();
+    skills::SkillStore::sync_all(&data);
+    Ok(())
+}
+
 #[tauri::command]
 fn get_switch_history(
     state: State<AppState>,
@@ -1782,6 +1864,16 @@ pub fn run() {
                 *qr = Some(handle);
             }
 
+            // 启动时自动扫描并导入已有 skills
+            {
+                let mut data = skills::SkillStore::load();
+                let count = skills::SkillStore::scan_existing(&mut data);
+                if count > 0 {
+                    let _ = skills::SkillStore::save(&data);
+                    println!("[Skills] 自动导入 {} 个已有 skill", count);
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1827,6 +1919,16 @@ pub fn run() {
             get_token_history,
             get_switch_history,
             get_switch_stats,
+            get_installed_skills,
+            get_skill_repos,
+            add_skill_repo,
+            remove_skill_repo,
+            discover_skills,
+            install_skill,
+            uninstall_skill,
+            toggle_skill_app,
+            scan_and_import_skills,
+            sync_all_skills,
             check_sync_conflict,
             request_quarantine_fix_ticket,
             fix_codex_quarantine,

@@ -12,10 +12,11 @@ import { AccountList } from './components/AccountList';
 import { Settings } from './components/Settings';
 import { Proxy } from './components/Proxy';
 import { Stats } from './components/Stats';
+import { Skills } from './components/Skills';
 import { ConfirmModal } from './components/ConfirmModal';
 import './App.css';
 
-type PageType = 'dashboard' | 'accounts' | 'proxy' | 'stats' | 'settings';
+type PageType = 'dashboard' | 'accounts' | 'proxy' | 'stats' | 'skills' | 'settings';
 
 function App() {
   const {
@@ -328,6 +329,12 @@ function App() {
             统计
           </button>
           <button
+            className={`nav-item ${currentPage === 'skills' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('skills')}
+          >
+            Skills
+          </button>
+          <button
             className={`nav-item ${currentPage === 'settings' ? 'active' : ''}`}
             onClick={() => setCurrentPage('settings')}
           >
@@ -410,6 +417,8 @@ function App() {
           <Proxy />
         ) : currentPage === 'stats' ? (
           <Stats />
+        ) : currentPage === 'skills' ? (
+          <Skills />
         ) : (
           <Settings />
         )}

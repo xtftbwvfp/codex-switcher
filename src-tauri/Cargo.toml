@@ -30,6 +30,7 @@ http-body-util = "0.1"
 bytes = "1"
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+zip = "2"
 url = "2"
 base64 = "0.22.1"
 rand = "0.9.2"
