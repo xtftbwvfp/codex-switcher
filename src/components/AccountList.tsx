@@ -30,6 +30,9 @@ interface AccountListProps {
     onSetInactiveRefreshEnabled: (id: string, enabled: boolean) => void;
     onUpdateSettings: (settings: AppSettings) => void;
     onRefreshComplete?: () => void;
+    onAddAccount?: () => void;
+    onRefreshUsage?: () => void;
+    usageLoading?: boolean;
 }
 
 export function AccountList({
@@ -37,6 +40,9 @@ export function AccountList({
     currentId,
     settings,
     onSwitch,
+    onAddAccount,
+    onRefreshUsage,
+    usageLoading,
     onDelete,
     onSetInactiveRefreshEnabled,
     onUpdateSettings,
@@ -244,6 +250,17 @@ export function AccountList({
                     <Zap size={14} fill={autoReload ? "currentColor" : "none"} />
                     <span style={{ fontSize: '12px' }}>自动重载</span>
                 </button>
+                {onAddAccount && (
+                    <button className="btn-icon-text" onClick={onAddAccount} style={{ marginRight: '8px', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', background: 'var(--primary-color)', color: 'white', border: 'none', fontSize: '12px' }}>
+                        + 添加
+                    </button>
+                )}
+                {onRefreshUsage && (
+                    <button className="btn-icon-text" onClick={onRefreshUsage} disabled={usageLoading} style={{ marginRight: '8px', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', background: 'var(--accent-color)', color: 'white', border: 'none', fontSize: '12px' }}>
+                        <RefreshCw className={usageLoading ? 'spinning' : ''} size={12} />
+                        配额
+                    </button>
+                )}
                 <button className="btn-refresh" onClick={() => { setIsRefreshingAll(true); Promise.all(filteredAccounts.map(a => handleRefreshOne(a.id))).finally(() => setIsRefreshingAll(false)); }}>
                     <RefreshCw className={isRefreshingAll ? 'spinning' : ''} size={16} />
                 </button>

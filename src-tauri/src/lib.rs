@@ -1471,6 +1471,14 @@ fn get_skill_app_status() -> Result<std::collections::HashMap<String, bool>, Str
 }
 
 #[tauri::command]
+#[tauri::command]
+fn get_skill_content(directory: String) -> Result<String, String> {
+    let ssot = dirs::home_dir().unwrap().join(".codex-switcher").join("skills").join(&directory);
+    let md_path = ssot.join("SKILL.md");
+    std::fs::read_to_string(&md_path).map_err(|e| format!("读取失败: {}", e))
+}
+
+#[tauri::command]
 fn scan_and_import_skills() -> Result<usize, String> {
     let mut data = skills::SkillStore::load();
     let count = skills::SkillStore::scan_existing(&mut data);
@@ -1933,6 +1941,7 @@ pub fn run() {
             uninstall_skill,
             toggle_skill_app_link,
             get_skill_app_status,
+            get_skill_content,
             scan_and_import_skills,
             sync_all_skills,
             check_sync_conflict,

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import Markdown from 'react-markdown';
 import './Skills.css';
 
 interface SkillApps {
@@ -52,6 +53,8 @@ export function Skills() {
     const [search, setSearch] = useState('');
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [detailSkill, setDetailSkill] = useState<InstalledSkill | null>(null);
+    const [detailContent, setDetailContent] = useState<string>('');
 
     // 新仓库表单
     const [newOwner, setNewOwner] = useState('');
@@ -133,6 +136,16 @@ export function Skills() {
             await loadInstalled();
         } catch (e) {
             showMsg('error', `卸载失败: ${e}`);
+        }
+    };
+
+    const handleOpenDetail = async (skill: InstalledSkill) => {
+        setDetailSkill(skill);
+        try {
+            const content = await invoke<string>('get_skill_content', { directory: skill.directory });
+            setDetailContent(content);
+        } catch {
+            setDetailContent('无法读取 SKILL.md');
         }
     };
 
@@ -249,7 +262,7 @@ export function Skills() {
                         {filtered.length === 0 ? (
                             <div className="skills-empty">暂无已安装的 skill</div>
                         ) : filtered.map(skill => (
-                            <div key={skill.id} className="skill-card">
+                            <div key={skill.id} className="skill-card" onClick={() => handleOpenDetail(skill)} style={{ cursor: 'pointer' }}>
                                 <div className="skill-info">
                                     <div className="skill-name">{skill.name}</div>
                                     <div className="skill-desc">{skill.description || '无描述'}</div>
@@ -262,7 +275,7 @@ export function Skills() {
                                 </div>
                                 <button
                                     className="btn btn-sm btn-danger"
-                                    onClick={() => handleUninstall(skill.id, skill.name)}
+                                    onClick={(e) => { e.stopPropagation(); handleUninstall(skill.id, skill.name); }}
                                     title="卸载"
                                 >
                                     删除
@@ -330,6 +343,31 @@ export function Skills() {
                         <input placeholder="repo" value={newName} onChange={e => setNewName(e.target.value)} className="repo-input" />
                         <input placeholder="branch" value={newBranch} onChange={e => setNewBranch(e.target.value)} className="repo-input small" />
                         <button className="btn btn-sm btn-primary" onClick={handleAddRepo}>添加</button>
+                    </div>
+                </div>
+            )}
+            {/* Skill 详情弹窗 */}
+            {detailSkill && (
+                <div className="skill-detail-overlay" onClick={() => setDetailSkill(null)}>
+                    <div className="skill-detail-modal" onClick={e => e.stopPropagation()}>
+                        <div className="detail-header">
+                            <div>
+                                <h2>{detailSkill.name}</h2>
+                                <p className="detail-desc">{detailSkill.description}</p>
+                            </div>
+                            <button className="detail-close" onClick={() => setDetailSkill(null)}>✕</button>
+                        </div>
+                        <div className="detail-content">
+                            <Markdown>{detailContent}</Markdown>
+                        </div>
+                        <div className="detail-footer">
+                            <button
+                                className="btn btn-sm btn-danger"
+                                onClick={() => { handleUninstall(detailSkill.id, detailSkill.name); setDetailSkill(null); }}
+                            >
+                                卸载
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}

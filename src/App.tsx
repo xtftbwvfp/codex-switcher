@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { RefreshCw, Zap } from 'lucide-react';
+import { Zap } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -296,10 +296,6 @@ function App() {
             <Zap size={18} />
           </div>
           <h1>Codex Switcher <span className="app-version">v0.2.0</span></h1>
-          <div className={`proxy-indicator ${proxyRunning ? 'on' : 'off'}`} title={proxyRunning ? '代理运行中' : '代理未启动'}>
-            <span className="proxy-dot" />
-            {proxyRunning ? 'Proxy ON' : 'Proxy OFF'}
-          </div>
         </div>
 
         {/* 导航菜单 */}
@@ -343,18 +339,10 @@ function App() {
         </nav>
 
         <div className="header-actions">
-          <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
-            + 添加账号
-          </button>
-          <button
-            className="btn btn-accent"
-            onClick={refreshUsage}
-            disabled={usageLoading}
-            title="刷新配额"
-          >
-            <RefreshCw className={`icon ${usageLoading ? 'spinning' : ''}`} style={{ marginRight: '8px' }} />
-            {usageLoading ? '刷新中...' : '刷新配额'}
-          </button>
+          <div className={`proxy-indicator ${proxyRunning ? 'on' : 'off'}`} title={proxyRunning ? '代理运行中' : '代理未启动'}>
+            <span className="proxy-dot" />
+            {proxyRunning ? 'Proxy ON' : 'Proxy OFF'}
+          </div>
         </div>
       </header>
 
@@ -412,6 +400,9 @@ function App() {
             onSetInactiveRefreshEnabled={setInactiveRefreshEnabled}
             onUpdateSettings={updateSettings}
             onRefreshComplete={refresh}
+            onAddAccount={() => setShowAddModal(true)}
+            onRefreshUsage={refreshUsage}
+            usageLoading={usageLoading}
           />
         ) : currentPage === 'proxy' ? (
           <Proxy />
