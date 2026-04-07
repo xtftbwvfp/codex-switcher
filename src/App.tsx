@@ -296,6 +296,10 @@ function App() {
             <Zap size={18} />
           </div>
           <h1>Codex Switcher <span className="app-version">v0.2.0</span></h1>
+          <div className={`proxy-indicator ${proxyRunning ? 'on' : 'off'}`} title={proxyRunning ? '代理运行中' : '代理未启动'}>
+            <span className="proxy-dot" />
+            {proxyRunning ? 'Proxy ON' : 'Proxy OFF'}
+          </div>
         </div>
 
         {/* 导航菜单 */}
@@ -339,10 +343,9 @@ function App() {
         </nav>
 
         <div className="header-actions">
-          <div className={`proxy-indicator ${proxyRunning ? 'on' : 'off'}`} title={proxyRunning ? '代理运行中' : '代理未启动'}>
-            <span className="proxy-dot" />
-            {proxyRunning ? 'Proxy ON' : 'Proxy OFF'}
-          </div>
+          <button className="btn btn-primary" onClick={() => setShowAddModal(true)}>
+            + 添加账号
+          </button>
         </div>
       </header>
 

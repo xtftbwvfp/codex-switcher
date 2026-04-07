@@ -1471,7 +1471,6 @@ fn get_skill_app_status() -> Result<std::collections::HashMap<String, bool>, Str
 }
 
 #[tauri::command]
-#[tauri::command]
 fn get_skill_content(directory: String) -> Result<String, String> {
     let ssot = dirs::home_dir().unwrap().join(".codex-switcher").join("skills").join(&directory);
     let md_path = ssot.join("SKILL.md");
