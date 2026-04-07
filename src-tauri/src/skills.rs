@@ -111,14 +111,24 @@ fn ssot_dir() -> PathBuf {
         .join("skills")
 }
 
-/// 各 CLI 的 skills 目录
+/// 各 CLI 的 skills 目录（跨平台）
 fn app_skills_dir(app: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     match app {
         "codex" => Some(home.join(".codex").join("skills")),
         "claude" => Some(home.join(".claude").join("skills")),
         "gemini" => Some(home.join(".gemini").join("skills")),
-        "opencode" => Some(home.join(".config").join("opencode").join("skills")),
+        "opencode" => {
+            // Windows: %APPDATA%\opencode\skills, Unix: ~/.config/opencode/skills
+            #[cfg(windows)]
+            {
+                dirs::config_dir().map(|c| c.join("opencode").join("skills"))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(home.join(".config").join("opencode").join("skills"))
+            }
+        }
         _ => None,
     }
 }
@@ -213,12 +223,32 @@ fn link_app_to_ssot(app: &str) -> Result<(), String> {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // 创建 symlink
+    // 创建 symlink / junction
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&ssot, &target)
-            .map_err(|e| format!("创建 symlink {} → {} 失败: {}", target.display(), ssot.display(), e))?;
+            .map_err(|e| format!("创建 symlink 失败: {}", e))?;
         println!("[Skills] {} → SSOT (symlink)", app);
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows: 用 junction（不需要管理员权限）
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J", &target.to_string_lossy(), &ssot.to_string_lossy()])
+            .output();
+
+        match status {
+            Ok(out) if out.status.success() => {
+                println!("[Skills] {} → SSOT (junction)", app);
+            }
+            _ => {
+                // junction 失败，fallback 到 copy
+                println!("[Skills] junction 失败，使用 copy 模式");
+                copy_dir_recursive(&ssot, &target)?;
+                println!("[Skills] {} → SSOT (copy)", app);
+            }
+        }
     }
 
     Ok(())
@@ -322,10 +352,23 @@ impl SkillStore {
         if enabled {
             link_app_to_ssot(app)?;
         } else {
-            // 移除 symlink
+            // 移除 symlink / junction
             if target.is_symlink() {
-                std::fs::remove_file(&target)
-                    .map_err(|e| format!("移除 symlink 失败: {}", e))?;
+                let _ = std::fs::remove_file(&target);
+                println!("[Skills] 已断开 {} 的 skills 链接", app);
+            } else if target.is_dir() {
+                // Windows junction 或 copy 模式
+                #[cfg(windows)]
+                {
+                    // junction 用 rmdir 移除
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "rmdir", &target.to_string_lossy()])
+                        .output();
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = std::fs::remove_dir_all(&target);
+                }
                 println!("[Skills] 已断开 {} 的 skills 链接", app);
             }
         }
