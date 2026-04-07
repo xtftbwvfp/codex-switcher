@@ -103,10 +103,15 @@ impl Default for SkillData {
 // 路径
 // ────────────────────────────────────────────────────────────────
 
+/// SSOT 目录：~/.codex-switcher/skills/
 fn ssot_dir() -> PathBuf {
-    dirs::home_dir().unwrap().join(".codex").join("skills")
+    dirs::home_dir()
+        .unwrap()
+        .join(".codex-switcher")
+        .join("skills")
 }
 
+/// 各 CLI 的 skills 目录
 fn app_skills_dir(app: &str) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     match app {
@@ -116,6 +121,107 @@ fn app_skills_dir(app: &str) -> Option<PathBuf> {
         "opencode" => Some(home.join(".config").join("opencode").join("skills")),
         _ => None,
     }
+}
+
+/// 初始化 SSOT：如果 ~/.codex/skills/ 是真实目录（非 symlink），迁移到 SSOT
+pub fn init_ssot() -> Result<(), String> {
+    let ssot = ssot_dir();
+    let codex_skills = dirs::home_dir().unwrap().join(".codex").join("skills");
+
+    // SSOT 已存在且 codex 已经是 symlink → 不需要迁移
+    if ssot.exists() && codex_skills.is_symlink() {
+        return Ok(());
+    }
+
+    // SSOT 不存在 → 需要创建
+    if !ssot.exists() {
+        std::fs::create_dir_all(&ssot)
+            .map_err(|e| format!("创建 SSOT 目录失败: {}", e))?;
+
+        // 如果 ~/.codex/skills/ 是真实目录（有内容），迁移过来
+        if codex_skills.exists() && codex_skills.is_dir() && !codex_skills.is_symlink() {
+            println!("[Skills] 迁移 ~/.codex/skills/ → SSOT...");
+            let entries: Vec<_> = std::fs::read_dir(&codex_skills)
+                .map_err(|e| format!("读取目录失败: {}", e))?
+                .flatten()
+                .collect();
+
+            for entry in entries {
+                let src = entry.path();
+                let name = match src.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                let dst = ssot.join(&name);
+                // 移动（同一文件系统用 rename，跨文件系统用 copy+delete）
+                if std::fs::rename(&src, &dst).is_err() {
+                    copy_dir_recursive(&src, &dst)?;
+                    let _ = std::fs::remove_dir_all(&src);
+                }
+            }
+            println!("[Skills] 迁移完成");
+
+            // 删除原目录
+            let _ = std::fs::remove_dir_all(&codex_skills);
+        }
+    }
+
+    // 确保各 CLI 的 skills 目录是指向 SSOT 的 symlink
+    let apps = ["codex", "claude", "gemini", "opencode"];
+    for app in &apps {
+        link_app_to_ssot(app)?;
+    }
+
+    Ok(())
+}
+
+/// 将某个 CLI 的 skills 目录 symlink 到 SSOT
+fn link_app_to_ssot(app: &str) -> Result<(), String> {
+    let target = match app_skills_dir(app) {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    let ssot = ssot_dir();
+
+    // 已经是正确的 symlink → 跳过
+    if target.is_symlink() {
+        if let Ok(link_target) = std::fs::read_link(&target) {
+            if link_target == ssot {
+                return Ok(());
+            }
+        }
+        // symlink 指向了错误目标，删掉重建
+        let _ = std::fs::remove_file(&target);
+    } else if target.exists() {
+        // 是一个真实目录但是空的 → 删掉
+        if target.is_dir() {
+            let is_empty = std::fs::read_dir(&target)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
+            if is_empty {
+                let _ = std::fs::remove_dir(&target);
+            } else {
+                // 非空真实目录 → 不覆盖，用户可能有独立内容
+                println!("[Skills] {} skills 目录非空且不是 symlink，跳过", app);
+                return Ok(());
+            }
+        }
+    }
+
+    // 确保父目录存在
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // 创建 symlink
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&ssot, &target)
+            .map_err(|e| format!("创建 symlink {} → {} 失败: {}", target.display(), ssot.display(), e))?;
+        println!("[Skills] {} → SSOT (symlink)", app);
+    }
+
+    Ok(())
 }
 
 fn data_path() -> PathBuf {
@@ -206,98 +312,47 @@ impl SkillStore {
         imported
     }
 
-    /// 同步一个 skill 到指定 app 目录
-    pub fn sync_skill_to_app(directory: &str, app: &str) -> Result<(), String> {
-        let source = ssot_dir().join(directory);
-        if !source.exists() {
-            return Err(format!("SSOT 目录不存在: {}", source.display()));
-        }
-
-        // codex 是 SSOT 本身，不需要同步
-        if app == "codex" {
-            return Ok(());
-        }
-
-        let target_dir = app_skills_dir(app)
-            .ok_or_else(|| format!("未知的 app: {}", app))?;
-
-        // 确保目标 skills 目录存在
-        std::fs::create_dir_all(&target_dir)
-            .map_err(|e| format!("创建目录失败: {}", e))?;
-
-        let target = target_dir.join(directory);
-
-        // 移除已存在的（symlink 或目录）
-        if target.exists() || target.is_symlink() {
-            if target.is_symlink() || target.is_file() {
-                let _ = std::fs::remove_file(&target);
-            } else {
-                let _ = std::fs::remove_dir_all(&target);
-            }
-        }
-
-        // 尝试 symlink
-        #[cfg(unix)]
-        {
-            if std::os::unix::fs::symlink(&source, &target).is_ok() {
-                return Ok(());
-            }
-        }
-
-        // fallback: copy
-        copy_dir_recursive(&source, &target)
-            .map_err(|e| format!("复制目录失败: {}", e))
-    }
-
-    /// 从指定 app 目录移除一个 skill
-    pub fn remove_skill_from_app(directory: &str, app: &str) -> Result<(), String> {
-        if app == "codex" {
-            // SSOT 目录不能通过 app 移除
-            return Ok(());
-        }
-
-        let target_dir = match app_skills_dir(app) {
-            Some(d) => d,
-            None => return Ok(()),
-        };
-
-        let target = target_dir.join(directory);
-        if target.is_symlink() || target.is_file() {
-            let _ = std::fs::remove_file(&target);
-        } else if target.is_dir() {
-            let _ = std::fs::remove_dir_all(&target);
-        }
-        Ok(())
-    }
-
-    /// 切换 skill 在某 app 上的启用状态
-    pub fn toggle_app(
-        data: &mut SkillData,
-        skill_id: &str,
-        app: &str,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let skill = data
-            .skills
-            .iter_mut()
-            .find(|s| s.id == skill_id)
-            .ok_or_else(|| format!("skill 不存在: {}", skill_id))?;
-
-        match app {
-            "codex" => skill.apps.codex = enabled,
-            "claude" => skill.apps.claude = enabled,
-            "gemini" => skill.apps.gemini = enabled,
-            "opencode" => skill.apps.opencode = enabled,
-            _ => return Err(format!("未知 app: {}", app)),
-        }
+    /// 切换某个 app 的整个 skills 目录 symlink
+    /// 新架构：整个目录是 symlink，不需要 per-skill 同步
+    pub fn toggle_app_link(app: &str, enabled: bool) -> Result<(), String> {
+        let target = app_skills_dir(app)
+            .ok_or_else(|| format!("未知 app: {}", app))?;
+        let ssot = ssot_dir();
 
         if enabled {
-            Self::sync_skill_to_app(&skill.directory, app)?;
+            link_app_to_ssot(app)?;
         } else {
-            Self::remove_skill_from_app(&skill.directory, app)?;
+            // 移除 symlink
+            if target.is_symlink() {
+                std::fs::remove_file(&target)
+                    .map_err(|e| format!("移除 symlink 失败: {}", e))?;
+                println!("[Skills] 已断开 {} 的 skills 链接", app);
+            }
         }
-
         Ok(())
+    }
+
+    /// 获取各 app 的链接状态
+    pub fn get_app_link_status() -> std::collections::HashMap<String, bool> {
+        let mut status = std::collections::HashMap::new();
+        let ssot = ssot_dir();
+
+        for app in &["codex", "claude", "gemini", "opencode"] {
+            let linked = if let Some(target) = app_skills_dir(app) {
+                if target.is_symlink() {
+                    std::fs::read_link(&target)
+                        .map(|t| t == ssot)
+                        .unwrap_or(false)
+                } else {
+                    // codex 可能直接是 SSOT 本身
+                    target == ssot || (target.exists() && target.is_dir())
+                }
+            } else {
+                false
+            };
+            status.insert(app.to_string(), linked);
+        }
+        status
     }
 
     /// 从 GitHub 仓库发现可用 skills
@@ -423,12 +478,7 @@ impl SkillStore {
             .ok_or_else(|| format!("skill 不存在: {}", skill_id))?
             .clone();
 
-        // 从所有 app 目录移除
-        for app in &["claude", "gemini", "opencode"] {
-            let _ = Self::remove_skill_from_app(&skill.directory, app);
-        }
-
-        // 从 SSOT 删除
+        // 从 SSOT 删除（所有 app 通过 symlink 指向 SSOT，自动同步）
         let ssot_path = ssot_dir().join(&skill.directory);
         if ssot_path.exists() {
             let _ = std::fs::remove_dir_all(&ssot_path);
@@ -440,21 +490,9 @@ impl SkillStore {
         Ok(())
     }
 
-    /// 全量同步所有 skills 到各 app
-    pub fn sync_all(data: &SkillData) {
-        for skill in &data.skills {
-            for (app, enabled) in [
-                ("claude", skill.apps.claude),
-                ("gemini", skill.apps.gemini),
-                ("opencode", skill.apps.opencode),
-            ] {
-                if enabled {
-                    let _ = Self::sync_skill_to_app(&skill.directory, app);
-                } else {
-                    let _ = Self::remove_skill_from_app(&skill.directory, app);
-                }
-            }
-        }
+    /// 确保所有 app 的 symlink 正确
+    pub fn sync_all() {
+        let _ = init_ssot();
     }
 }
 

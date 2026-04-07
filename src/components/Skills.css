@@ -71,6 +71,49 @@
     border-color: var(--primary-color);
 }
 
+/* CLI 同步状态栏 */
+.app-sync-bar {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.app-sync-item {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.app-sync-item.linked {
+    border-color: var(--success-color);
+    background: rgba(16, 185, 129, 0.05);
+}
+
+.app-sync-item input {
+    accent-color: var(--success-color);
+    cursor: pointer;
+}
+
+.link-status {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.app-sync-item.linked .link-status {
+    color: var(--success-color);
+}
+
 .skills-list {
     display: flex;
     flex-direction: column;

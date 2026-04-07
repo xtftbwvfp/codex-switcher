@@ -48,6 +48,7 @@ export function Skills() {
     const [installed, setInstalled] = useState<InstalledSkill[]>([]);
     const [discovered, setDiscovered] = useState<DiscoverableSkill[]>([]);
     const [repos, setRepos] = useState<SkillRepo[]>([]);
+    const [appStatus, setAppStatus] = useState<Record<string, boolean>>({});
     const [search, setSearch] = useState('');
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -76,9 +77,17 @@ export function Skills() {
         } catch (e) { console.error(e); }
     };
 
+    const loadAppStatus = async () => {
+        try {
+            const status = await invoke<Record<string, boolean>>('get_skill_app_status');
+            setAppStatus(status);
+        } catch (e) { console.error(e); }
+    };
+
     useEffect(() => {
         loadInstalled();
         loadRepos();
+        loadAppStatus();
         // 首次启动扫描导入
         invoke<number>('scan_and_import_skills').then(count => {
             if (count > 0) {
@@ -127,12 +136,13 @@ export function Skills() {
         }
     };
 
-    const handleToggle = async (id: string, app: string, enabled: boolean) => {
+    const handleToggleAppLink = async (app: string, enabled: boolean) => {
         try {
-            await invoke('toggle_skill_app', { skillId: id, app, enabled });
-            await loadInstalled();
+            await invoke('toggle_skill_app_link', { app, enabled });
+            showMsg('success', enabled ? `${app} 已链接到 Skills` : `${app} 已断开链接`);
+            await loadAppStatus();
         } catch (e) {
-            showMsg('error', `同步失败: ${e}`);
+            showMsg('error', `操作失败: ${e}`);
         }
     };
 
@@ -219,43 +229,48 @@ export function Skills() {
 
             {/* 已安装列表 */}
             {tab === 'installed' && (
-                <div className="skills-list">
-                    {filtered.length === 0 ? (
-                        <div className="skills-empty">暂无已安装的 skill</div>
-                    ) : filtered.map(skill => (
-                        <div key={skill.id} className="skill-card">
-                            <div className="skill-info">
-                                <div className="skill-name">{skill.name}</div>
-                                <div className="skill-desc">{skill.description || '无描述'}</div>
-                                <div className="skill-meta">
-                                    {skill.source === 'github' && skill.repo_owner && (
-                                        <span className="skill-source">{skill.repo_owner}/{skill.repo_name}</span>
-                                    )}
-                                    {skill.source === 'local' && <span className="skill-source">本地</span>}
+                <>
+                    {/* CLI 同步状态 */}
+                    <div className="app-sync-bar">
+                        {APPS.map(app => (
+                            <label key={app} className={`app-sync-item ${appStatus[app] ? 'linked' : ''}`}>
+                                <input
+                                    type="checkbox"
+                                    checked={appStatus[app] || false}
+                                    onChange={e => handleToggleAppLink(app, e.target.checked)}
+                                />
+                                <span>{app}</span>
+                                <span className="link-status">{appStatus[app] ? '已链接' : '未链接'}</span>
+                            </label>
+                        ))}
+                    </div>
+
+                    <div className="skills-list">
+                        {filtered.length === 0 ? (
+                            <div className="skills-empty">暂无已安装的 skill</div>
+                        ) : filtered.map(skill => (
+                            <div key={skill.id} className="skill-card">
+                                <div className="skill-info">
+                                    <div className="skill-name">{skill.name}</div>
+                                    <div className="skill-desc">{skill.description || '无描述'}</div>
+                                    <div className="skill-meta">
+                                        {skill.source === 'github' && skill.repo_owner && (
+                                            <span className="skill-source">{skill.repo_owner}/{skill.repo_name}</span>
+                                        )}
+                                        {skill.source === 'local' && <span className="skill-source">本地</span>}
+                                    </div>
                                 </div>
+                                <button
+                                    className="btn btn-sm btn-danger"
+                                    onClick={() => handleUninstall(skill.id, skill.name)}
+                                    title="卸载"
+                                >
+                                    删除
+                                </button>
                             </div>
-                            <div className="skill-apps">
-                                {APPS.map(app => (
-                                    <label key={app} className="app-toggle" title={app}>
-                                        <input
-                                            type="checkbox"
-                                            checked={(skill.apps as any)[app]}
-                                            onChange={e => handleToggle(skill.id, app, e.target.checked)}
-                                        />
-                                        <span className="app-name">{app}</span>
-                                    </label>
-                                ))}
-                            </div>
-                            <button
-                                className="btn btn-sm btn-danger"
-                                onClick={() => handleUninstall(skill.id, skill.name)}
-                                title="卸载"
-                            >
-                                删除
-                            </button>
-                        </div>
-                    ))}
-                </div>
+                        ))}
+                    </div>
+                </>
             )}
 
             {/* 发现列表 */}

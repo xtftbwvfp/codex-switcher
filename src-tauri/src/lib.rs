@@ -1461,10 +1461,13 @@ fn uninstall_skill(skill_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn toggle_skill_app(skill_id: String, app: String, enabled: bool) -> Result<(), String> {
-    let mut data = skills::SkillStore::load();
-    skills::SkillStore::toggle_app(&mut data, &skill_id, &app, enabled)?;
-    skills::SkillStore::save(&data)
+fn toggle_skill_app_link(app: String, enabled: bool) -> Result<(), String> {
+    skills::SkillStore::toggle_app_link(&app, enabled)
+}
+
+#[tauri::command]
+fn get_skill_app_status() -> Result<std::collections::HashMap<String, bool>, String> {
+    Ok(skills::SkillStore::get_app_link_status())
 }
 
 #[tauri::command]
@@ -1479,8 +1482,7 @@ fn scan_and_import_skills() -> Result<usize, String> {
 
 #[tauri::command]
 fn sync_all_skills() -> Result<(), String> {
-    let data = skills::SkillStore::load();
-    skills::SkillStore::sync_all(&data);
+    skills::SkillStore::sync_all();
     Ok(())
 }
 
@@ -1864,7 +1866,10 @@ pub fn run() {
                 *qr = Some(handle);
             }
 
-            // 启动时自动扫描并导入已有 skills
+            // 初始化 Skills SSOT + 自动导入
+            if let Err(e) = skills::init_ssot() {
+                eprintln!("[Skills] SSOT 初始化失败: {}", e);
+            }
             {
                 let mut data = skills::SkillStore::load();
                 let count = skills::SkillStore::scan_existing(&mut data);
@@ -1926,7 +1931,8 @@ pub fn run() {
             discover_skills,
             install_skill,
             uninstall_skill,
-            toggle_skill_app,
+            toggle_skill_app_link,
+            get_skill_app_status,
             scan_and_import_skills,
             sync_all_skills,
             check_sync_conflict,
