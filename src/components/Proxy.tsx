@@ -231,9 +231,9 @@ export function Proxy() {
 
                 <div className="setting-item">
                     <div className="setting-info">
-                        <span className="setting-label">全局代理（所有终端生效）</span>
+                        <span className="setting-label">全局代理（CLI + App 全覆盖）</span>
                         <span className="setting-desc">
-                            写入 ~/.zshrc 和 ~/.bashrc，新打开的终端中所有 codex 命令自动走代理
+                            同时写入 ~/.zshrc、launchctl 和 ~/.codex/config.toml，终端 CLI 和 Codex App 均走代理
                         </span>
                     </div>
                     <div className="env-btn-group">

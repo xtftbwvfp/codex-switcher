@@ -1580,7 +1580,7 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
         results.push(rc_name.to_string());
     }
 
-    // GUI 应用：launchctl setenv（Codex App 重启后生效）
+    // ── 2. GUI 应用：launchctl setenv（Codex App 重启后生效）──
     #[cfg(target_os = "macos")]
     {
         if enable {
@@ -1596,8 +1596,11 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
         }
     }
 
-    // 注意：config.toml 不能覆盖内置的 openai provider（保留名），
-    // 只能通过 OPENAI_BASE_URL 环境变量设置代理地址。
+    // ── 3. Codex App config.toml：写入 openai_base_url ──
+    match set_codex_config_base_url(if enable { Some(&env_value) } else { None }) {
+        Ok(_) => results.push("config.toml".to_string()),
+        Err(e) => results.push(format!("config.toml(失败: {})", e)),
+    }
 
     let status = if enable { "已设置" } else { "已移除" };
     Ok(format!(
@@ -1605,6 +1608,68 @@ fn set_proxy_env(port: u16, enable: bool) -> Result<String, String> {
         status,
         results.join(", ")
     ))
+}
+
+/// 读写 ~/.codex/config.toml 的 openai_base_url 字段
+fn set_codex_config_base_url(url: Option<&str>) -> Result<(), String> {
+    let config_path = dirs::home_dir()
+        .ok_or("无法获取用户目录")?
+        .join(".codex")
+        .join("config.toml");
+
+    if !config_path.exists() {
+        if url.is_some() {
+            // 文件不存在，创建并写入
+            let content = format!("openai_base_url = \"{}\"\n", url.unwrap());
+            std::fs::write(&config_path, content)
+                .map_err(|e| format!("创建 config.toml 失败: {}", e))?;
+        }
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("读取 config.toml 失败: {}", e))?;
+
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut found = false;
+    let mut in_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // 检测 [section] 开头，用于判断是否在顶层
+        if trimmed.starts_with('[') {
+            in_section = true;
+        }
+
+        // 匹配顶层的 openai_base_url = "xxx"
+        if !in_section && trimmed.starts_with("openai_base_url") && trimmed.contains('=') {
+            found = true;
+            if let Some(u) = url {
+                new_lines.push(format!("openai_base_url = \"{}\"", u));
+            }
+            // url 为 None 时跳过这行（移除）
+            continue;
+        }
+        new_lines.push(line.to_string());
+    }
+
+    // 如果要设置但没找到已有行，在第一个 [section] 之前插入
+    if url.is_some() && !found {
+        let u = url.unwrap();
+        let insert_line = format!("openai_base_url = \"{}\"", u);
+        // 找到第一个 [section] 的位置
+        let pos = new_lines.iter().position(|l| l.trim().starts_with('['));
+        match pos {
+            Some(idx) => new_lines.insert(idx, insert_line),
+            None => new_lines.push(insert_line),
+        }
+    }
+
+    std::fs::write(&config_path, new_lines.join("\n") + "\n")
+        .map_err(|e| format!("写入 config.toml 失败: {}", e))?;
+
+    Ok(())
 }
 
 /// 切换 Codex fast 模式（修改 config.toml 的 profile 字段）
