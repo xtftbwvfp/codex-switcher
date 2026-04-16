@@ -9,6 +9,8 @@ interface ProxyStatus {
     port: number;
     is_running: boolean;
     base_url: string;
+    allow_lan: boolean;
+    lan_base_url?: string | null;
     total_requests: number;
     auto_switches: number;
 }
@@ -24,6 +26,7 @@ interface AppSettings {
     allow_auto_switch_to_free: boolean;
     proxy_enabled: boolean;
     proxy_port: number;
+    proxy_allow_lan: boolean;
     proxy_threshold_5h: number;
     proxy_threshold_weekly: number;
     proxy_free_guard: number;
@@ -204,6 +207,26 @@ export function Proxy() {
                         )}
                     </div>
                 </div>
+
+                <div className="setting-item sub-item">
+                    <div className="setting-info">
+                        <span className="setting-label">允许局域网访问</span>
+                        <span className="setting-desc">开启后监听 `0.0.0.0`，同一局域网内的 Windows 可直接连接这台机器的代理</span>
+                    </div>
+                    <label className="toggle">
+                        <input
+                            type="checkbox"
+                            checked={settings?.proxy_allow_lan ?? false}
+                            onChange={async e => {
+                                if (!settings) return;
+                                const updated = { ...settings, proxy_allow_lan: e.target.checked };
+                                setSettings(updated);
+                                await invoke('update_settings', { settings: updated });
+                            }}
+                        />
+                        <span className="toggle-slider"></span>
+                    </label>
+                </div>
             </div>
 
             {/* 环境变量配置 */}
@@ -218,16 +241,38 @@ export function Proxy() {
                         className="copy-command-button"
                         onClick={() => {
                             navigator.clipboard.writeText(
-                                `OPENAI_BASE_URL=http://localhost:${port}/v1 codex`
+                                `OPENAI_BASE_URL=${status?.base_url ?? `http://localhost:${port}/v1`} codex`
                             );
                             setCopied(true);
                             setTimeout(() => setCopied(false), 2000);
                         }}
                     >
-                        <code>OPENAI_BASE_URL=http://localhost:{port}/v1 codex</code>
+                        <code>OPENAI_BASE_URL={status?.base_url ?? `http://localhost:${port}/v1`} codex</code>
                         {copied ? <Check size={12} /> : <Copy size={12} />}
                     </button>
                 </div>
+
+                {status?.allow_lan && status.lan_base_url && (
+                    <div className="setting-item">
+                        <div className="setting-info">
+                            <span className="setting-label">局域网客户端</span>
+                            <span className="setting-desc">Windows 机器可把 `OPENAI_BASE_URL` 指向下面这个地址</span>
+                        </div>
+                        <button
+                            className="copy-command-button"
+                            onClick={() => {
+                                navigator.clipboard.writeText(
+                                    `OPENAI_BASE_URL=${status.lan_base_url} codex`
+                                );
+                                setCopied(true);
+                                setTimeout(() => setCopied(false), 2000);
+                            }}
+                        >
+                            <code>OPENAI_BASE_URL={status.lan_base_url} codex</code>
+                            {copied ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                    </div>
+                )}
 
                 <div className="setting-item">
                     <div className="setting-info">

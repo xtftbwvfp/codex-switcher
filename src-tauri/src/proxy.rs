@@ -80,6 +80,7 @@ struct ProxyState {
 pub fn start(
     store: Arc<Mutex<AccountStore>>,
     port: u16,
+    allow_lan: bool,
     app_handle: tauri::AppHandle,
     stats: Arc<ProxyStats>,
     tracker: Arc<TokenTracker>,
@@ -87,7 +88,11 @@ pub fn start(
     switch_logger: Arc<SwitchLogger>,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr = if allow_lan {
+            SocketAddr::from(([0, 0, 0, 0], port))
+        } else {
+            SocketAddr::from(([127, 0, 0, 1], port))
+        };
         let listener = match TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -96,7 +101,7 @@ pub fn start(
             }
         };
 
-        println!("[Proxy] 代理服务器已启动，监听 127.0.0.1:{}", port);
+        println!("[Proxy] 代理服务器已启动，监听 {}:{}", addr.ip(), port);
 
         let client = Client::builder()
             .build()

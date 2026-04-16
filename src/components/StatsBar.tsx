@@ -9,6 +9,8 @@ interface ProxyStatus {
     port: number;
     is_running: boolean;
     base_url: string;
+    allow_lan: boolean;
+    lan_base_url?: string | null;
 }
 
 interface StatsBarProps {
@@ -90,7 +92,9 @@ export function StatsBar({ accountCount, usage }: StatsBarProps) {
                         <div className="stat-value">:{proxyStatus.port}</div>
                         <div className="stat-label">代理</div>
                         <div className={`stat-hint ${proxyStatus.is_running ? 'good' : 'warn'}`}>
-                            {proxyStatus.is_running ? '运行中' : '已停止'}
+                            {proxyStatus.is_running
+                                ? proxyStatus.allow_lan ? '局域网可用' : '仅本机'
+                                : '已停止'}
                         </div>
                     </div>
                 </div>

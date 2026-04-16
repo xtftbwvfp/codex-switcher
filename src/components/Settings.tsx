@@ -14,6 +14,7 @@ interface AppSettings {
     allow_auto_switch_to_free: boolean;
     proxy_enabled: boolean;
     proxy_port: number;
+    proxy_allow_lan: boolean;
 }
 
 const IDE_OPTIONS = [
@@ -36,6 +37,7 @@ export function Settings() {
         allow_auto_switch_to_free: false,
         proxy_enabled: false,
         proxy_port: 18080,
+        proxy_allow_lan: false,
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);

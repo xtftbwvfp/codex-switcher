@@ -52,6 +52,10 @@ pub struct AppSettings {
     #[serde(default = "default_proxy_port")]
     pub proxy_port: u16,
 
+    /// 允许局域网设备访问代理
+    #[serde(default)]
+    pub proxy_allow_lan: bool,
+
     /// 5h 配额预防性切号阈值（0=仅429触发，10=剩余<10%时切）
     #[serde(default)]
     pub proxy_threshold_5h: u8,
@@ -130,6 +134,7 @@ impl Default for AppSettings {
             allow_auto_switch_to_free: false,
             proxy_enabled: false,
             proxy_port: default_proxy_port(),
+            proxy_allow_lan: false,
             proxy_threshold_5h: 0,
             proxy_threshold_weekly: 0,
             proxy_free_guard: 0,

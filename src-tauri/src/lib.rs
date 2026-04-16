@@ -20,6 +20,7 @@ use chrono::Utc;
 use refresh_lock::RefreshLockManager;
 use tauri::{Emitter, Manager, State};
 use usage::{UsageDisplay, UsageFetcher};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 
 const QUARANTINE_FIX_TICKET_TTL_SECS: i64 = 120;
 
@@ -159,8 +160,19 @@ pub struct ProxyStatus {
     pub port: u16,
     pub is_running: bool,
     pub base_url: String,
+    pub allow_lan: bool,
+    pub lan_base_url: Option<String>,
     pub total_requests: u64,
     pub auto_switches: u64,
+}
+
+fn detect_lan_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(1, 1, 1, 1), 80)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
 }
 
 /// 获取代理状态
@@ -177,6 +189,12 @@ fn get_proxy_status(state: State<AppState>) -> Result<ProxyStatus, String> {
         port: store.settings.proxy_port,
         is_running,
         base_url: format!("http://localhost:{}/v1", store.settings.proxy_port),
+        allow_lan: store.settings.proxy_allow_lan,
+        lan_base_url: if store.settings.proxy_allow_lan {
+            detect_lan_ipv4().map(|ip| format!("http://{}:{}/v1", ip, store.settings.proxy_port))
+        } else {
+            None
+        },
         total_requests: state
             .proxy_stats
             .total_requests
@@ -195,11 +213,19 @@ fn update_settings(
     app: tauri::AppHandle,
     settings: account::AppSettings,
 ) -> Result<(), String> {
-    let (prev_bg_refresh, prev_proxy_enabled, prev_quota_refresh) = {
+    let (
+        prev_bg_refresh,
+        prev_proxy_enabled,
+        prev_proxy_port,
+        prev_proxy_allow_lan,
+        prev_quota_refresh,
+    ) = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let prev = (
             store.settings.background_refresh,
             store.settings.proxy_enabled,
+            store.settings.proxy_port,
+            store.settings.proxy_allow_lan,
             store.settings.quota_refresh_enabled,
         );
         store.settings = settings.clone();
@@ -229,12 +255,15 @@ fn update_settings(
 
     // 代理生命周期
     let mut proxy_handle = state.proxy_handle.lock().map_err(|e| e.to_string())?;
+    let proxy_config_changed =
+        prev_proxy_port != settings.proxy_port || prev_proxy_allow_lan != settings.proxy_allow_lan;
     match (prev_proxy_enabled, settings.proxy_enabled) {
         (false, true) => {
             if proxy_handle.is_none() {
                 let handle = proxy::start(
                     state.store.clone(),
                     settings.proxy_port,
+                    settings.proxy_allow_lan,
                     app.clone(),
                     state.proxy_stats.clone(),
                     state.token_tracker.clone(),
@@ -250,6 +279,26 @@ fn update_settings(
                 handle.abort();
                 println!("[Proxy] 代理已停止");
             }
+        }
+        (true, true) if proxy_config_changed => {
+            if let Some(handle) = proxy_handle.take() {
+                handle.abort();
+            }
+            let handle = proxy::start(
+                state.store.clone(),
+                settings.proxy_port,
+                settings.proxy_allow_lan,
+                app.clone(),
+                state.proxy_stats.clone(),
+                state.token_tracker.clone(),
+                state.ws_disconnect.clone(),
+                state.switch_logger.clone(),
+            );
+            *proxy_handle = Some(handle);
+            println!(
+                "[Proxy] 代理已重启 (端口 {}, 局域网访问: {})",
+                settings.proxy_port, settings.proxy_allow_lan
+            );
         }
         _ => {}
     }
@@ -1904,15 +1953,22 @@ pub fn run() {
             }
 
             // 启动本地代理（仅在设置开启时）
-            let (proxy_enabled, proxy_port) = state
+            let (proxy_enabled, proxy_port, proxy_allow_lan) = state
                 .store
                 .lock()
-                .map(|s| (s.settings.proxy_enabled, s.settings.proxy_port))
-                .unwrap_or((false, 18080));
+                .map(|s| {
+                    (
+                        s.settings.proxy_enabled,
+                        s.settings.proxy_port,
+                        s.settings.proxy_allow_lan,
+                    )
+                })
+                .unwrap_or((false, 18080, false));
             if proxy_enabled {
                 let handle = proxy::start(
                     state.store.clone(),
                     proxy_port,
+                    proxy_allow_lan,
                     app.handle().clone(),
                     state.proxy_stats.clone(),
                     state.token_tracker.clone(),

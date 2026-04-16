@@ -55,6 +55,8 @@ export function Skills() {
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
     const [detailSkill, setDetailSkill] = useState<InstalledSkill | null>(null);
     const [detailContent, setDetailContent] = useState<string>('');
+    const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+    const [confirmInput, setConfirmInput] = useState('');
 
     // 新仓库表单
     const [newOwner, setNewOwner] = useState('');
@@ -66,8 +68,14 @@ export function Skills() {
         setTimeout(() => setMessage(null), 5000);
     };
 
-    const loadInstalled = async () => {
+    const loadInstalled = async (rescan = false) => {
         try {
+            if (rescan) {
+                const count = await invoke<number>('scan_and_import_skills');
+                if (count > 0) {
+                    showMsg('success', `自动导入 ${count} 个新 skill`);
+                }
+            }
             const list = await invoke<InstalledSkill[]>('get_installed_skills');
             setInstalled(list);
         } catch (e) { console.error(e); }
@@ -88,16 +96,9 @@ export function Skills() {
     };
 
     useEffect(() => {
-        loadInstalled();
+        loadInstalled(true); // 首次加载时扫描补录新 skill
         loadRepos();
         loadAppStatus();
-        // 首次启动扫描导入
-        invoke<number>('scan_and_import_skills').then(count => {
-            if (count > 0) {
-                showMsg('success', `自动导入 ${count} 个已有 skill`);
-                loadInstalled();
-            }
-        });
     }, []);
 
     const handleDiscover = async () => {
@@ -128,11 +129,18 @@ export function Skills() {
         }
     };
 
-    const handleUninstall = async (id: string, name: string) => {
-        if (!confirm(`确定要卸载 ${name} 吗？将从所有 CLI 目录移除。`)) return;
+    const handleUninstall = (id: string, name: string) => {
+        setConfirmDelete({ id, name });
+        setConfirmInput('');
+    };
+
+    const executeUninstall = async () => {
+        if (!confirmDelete) return;
         try {
-            await invoke('uninstall_skill', { skillId: id });
-            showMsg('success', `已卸载 ${name}`);
+            await invoke('uninstall_skill', { skillId: confirmDelete.id });
+            showMsg('success', `已卸载 ${confirmDelete.name}`);
+            setConfirmDelete(null);
+            setConfirmInput('');
             await loadInstalled();
         } catch (e) {
             showMsg('error', `卸载失败: ${e}`);
@@ -206,7 +214,7 @@ export function Skills() {
             <div className="skills-header">
                 <h2>Skills</h2>
                 <div className="skills-tabs">
-                    <button className={`tab-btn ${tab === 'installed' ? 'active' : ''}`} onClick={() => setTab('installed')}>
+                    <button className={`tab-btn ${tab === 'installed' ? 'active' : ''}`} onClick={() => { setTab('installed'); loadInstalled(true); }}>
                         已安装 ({installed.length})
                     </button>
                     <button className={`tab-btn ${tab === 'discover' ? 'active' : ''}`} onClick={() => { setTab('discover'); if (discovered.length === 0) handleDiscover(); }}>
@@ -346,6 +354,48 @@ export function Skills() {
                     </div>
                 </div>
             )}
+            {/* 删除确认弹窗 */}
+            {confirmDelete && (
+                <div className="skill-detail-overlay" onClick={() => setConfirmDelete(null)}>
+                    <div className="skill-detail-modal confirm-delete-modal" onClick={e => e.stopPropagation()}>
+                        <div className="detail-header">
+                            <h2>确认卸载</h2>
+                            <button className="detail-close" onClick={() => setConfirmDelete(null)}>✕</button>
+                        </div>
+                        <div className="detail-content">
+                            <p>即将卸载 <strong>{confirmDelete.name}</strong>，此操作将从所有 CLI 目录移除该 skill。</p>
+                            <p style={{ marginTop: '12px', color: 'var(--text-secondary)' }}>
+                                请输入 skill 名称 <code>{confirmDelete.name}</code> 以确认：
+                            </p>
+                            <input
+                                type="text"
+                                className="search-input"
+                                style={{ marginTop: '8px' }}
+                                placeholder={confirmDelete.name}
+                                value={confirmInput}
+                                onChange={e => setConfirmInput(e.target.value)}
+                                autoFocus
+                                onKeyDown={e => {
+                                    if (e.key === 'Enter' && confirmInput === confirmDelete.name) {
+                                        executeUninstall();
+                                    }
+                                }}
+                            />
+                        </div>
+                        <div className="detail-footer">
+                            <button className="btn btn-sm btn-ghost" onClick={() => setConfirmDelete(null)}>取消</button>
+                            <button
+                                className="btn btn-sm btn-danger"
+                                disabled={confirmInput !== confirmDelete.name}
+                                onClick={executeUninstall}
+                            >
+                                确认卸载
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Skill 详情弹窗 */}
             {detailSkill && (
                 <div className="skill-detail-overlay" onClick={() => setDetailSkill(null)}>
