@@ -87,6 +87,31 @@ pub struct AppSettings {
     /// 每轮刷新几个账号
     #[serde(default = "default_quota_refresh_batch")]
     pub quota_refresh_batch: u32,
+
+    // ===== Remote Mode（private-lan 功能，LAN 代理 + token 中心化）=====
+    /// 远程模式：off / server / client
+    #[serde(default = "default_remote_mode")]
+    pub remote_mode: String,
+
+    /// server 模式下 HTTP API 绑定端口
+    #[serde(default = "default_remote_server_port")]
+    pub remote_server_port: u16,
+
+    /// server 模式下 HTTP API 绑定地址 (e.g. "0.0.0.0")
+    #[serde(default = "default_remote_server_bind")]
+    pub remote_server_bind: String,
+
+    /// client 模式下 Mini 地址 (e.g. "http://192.168.2.14:18081")
+    #[serde(default)]
+    pub remote_mini_url: String,
+
+    /// client 模式下的回退地址（primary 不通时尝试），一般放 ZeroTier URL
+    #[serde(default)]
+    pub remote_mini_url_fallback: String,
+
+    /// 两端共用的认证密钥（X-Auth-Token 头）
+    #[serde(default)]
+    pub remote_shared_secret: String,
 }
 
 fn default_theme_palette() -> String {
@@ -121,6 +146,18 @@ fn default_quota_refresh_batch() -> u32 {
     1
 }
 
+fn default_remote_mode() -> String {
+    "off".to_string()
+}
+
+fn default_remote_server_port() -> u16 {
+    18081
+}
+
+fn default_remote_server_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -143,6 +180,12 @@ impl Default for AppSettings {
             quota_refresh_enabled: false,
             quota_refresh_interval: default_quota_refresh_interval(),
             quota_refresh_batch: default_quota_refresh_batch(),
+            remote_mode: default_remote_mode(),
+            remote_server_port: default_remote_server_port(),
+            remote_server_bind: default_remote_server_bind(),
+            remote_mini_url: String::new(),
+            remote_mini_url_fallback: String::new(),
+            remote_shared_secret: String::new(),
         }
     }
 }

@@ -8,6 +8,8 @@ mod oauth;
 mod oauth_server;
 mod proxy;
 mod refresh_lock;
+mod remote_client;
+mod remote_server;
 mod scheduler;
 mod skills;
 mod switch_log;
@@ -75,6 +77,7 @@ pub struct AppState {
     pub switch_logger: std::sync::Arc<switch_log::SwitchLogger>,
     pub quota_refresh_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub refresh_locks: RefreshLockManager,
+    pub remote_server_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     quarantine_fix_ticket: std::sync::Mutex<Option<QuarantineFixTicket>>,
 }
 
@@ -90,6 +93,7 @@ impl AppState {
             switch_logger: switch_log::SwitchLogger::new(),
             quota_refresh_handle: std::sync::Mutex::new(None),
             refresh_locks: RefreshLockManager::default(),
+            remote_server_handle: std::sync::Mutex::new(None),
             quarantine_fix_ticket: std::sync::Mutex::new(None),
         }
     }
@@ -698,6 +702,8 @@ async fn switch_account(
     };
     state.refresh_locks.release(&target_id).await;
     switch_result?;
+    // 切号后代理的远端 token 缓存需失效
+    proxy::invalidate_remote_token_cache();
     println!("[Switch] 切换完成！");
 
     // 记录切号日志
@@ -1952,6 +1958,178 @@ fn sync_active_with_disk(state: State<AppState>, app: tauri::AppHandle) -> Resul
     Ok(())
 }
 
+// ==================== Remote Mode Tauri Commands ====================
+
+/// 生成 32 字节随机 shared secret（UI 启用 server 模式时调用）
+#[tauri::command]
+fn remote_generate_secret() -> String {
+    use rand::RngCore;
+    let mut buf = [0u8; 32];
+    rand::rng().fill_bytes(&mut buf);
+    // 用 base64 URL safe 编码，避免特殊字符
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    URL_SAFE_NO_PAD.encode(buf)
+}
+
+/// 读取 client 配置快照：返回 (primary_url, fallback_url, secret)
+fn client_settings_snapshot_raw(
+    state: &State<AppState>,
+) -> Result<(String, String, String), String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    if store.settings.remote_mini_url.is_empty() && store.settings.remote_mini_url_fallback.is_empty() {
+        return Err("未配置 Mini 地址".to_string());
+    }
+    if store.settings.remote_shared_secret.is_empty() {
+        return Err("未配置共享密钥".to_string());
+    }
+    Ok((
+        store.settings.remote_mini_url.clone(),
+        store.settings.remote_mini_url_fallback.clone(),
+        store.settings.remote_shared_secret.clone(),
+    ))
+}
+
+/// 解析出当前可用 URL（primary → fallback），返回 (url, secret)
+async fn client_settings_snapshot(
+    state: &State<'_, AppState>,
+) -> Result<(String, String), String> {
+    let (primary, fallback, secret) = client_settings_snapshot_raw(state)?;
+    let url = remote_client::resolve_base_url(&primary, &fallback).await?;
+    Ok((url, secret))
+}
+
+#[tauri::command]
+async fn remote_health(base_url: String) -> Result<remote_client::RemoteHealth, String> {
+    remote_client::health(&base_url).await
+}
+
+#[tauri::command]
+async fn remote_test_auth(
+    base_url: String,
+    secret: String,
+) -> Result<remote_client::RemoteHealth, String> {
+    remote_client::test_auth(&base_url, &secret).await
+}
+
+/// 用当前 settings 的 primary + fallback 双探测，返回 (url_in_use, health)
+#[tauri::command]
+async fn remote_probe(
+    state: State<'_, AppState>,
+) -> Result<(String, remote_client::RemoteHealth), String> {
+    remote_client::invalidate_cached_url();
+    let (primary, fallback, secret) = client_settings_snapshot_raw(&state)?;
+    let url = remote_client::resolve_base_url(&primary, &fallback).await?;
+    let h = remote_client::test_auth(&url, &secret).await?;
+    Ok((url, h))
+}
+
+#[tauri::command]
+async fn remote_push_account(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    let account = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .list_accounts()
+            .into_iter()
+            .find(|a| a.id == id)
+            .cloned()
+            .ok_or_else(|| format!("本地未找到账号 {}", id))?
+    };
+    remote_client::upsert_account(&url, &secret, &account).await
+}
+
+#[tauri::command]
+async fn remote_push_all(state: State<'_, AppState>) -> Result<usize, String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    let accounts: Vec<Account> = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store.list_accounts().into_iter().cloned().collect()
+    };
+    let mut ok = 0usize;
+    for a in accounts.iter() {
+        remote_client::upsert_account(&url, &secret, a).await?;
+        ok += 1;
+    }
+    Ok(ok)
+}
+
+#[tauri::command]
+async fn remote_pull_all(state: State<'_, AppState>) -> Result<usize, String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    let remote_accounts = remote_client::list_accounts(&url, &secret).await?;
+    let mut merged = 0usize;
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    for ra in remote_accounts {
+        store.accounts.insert(ra.id.clone(), ra);
+        merged += 1;
+    }
+    store.save()?;
+    Ok(merged)
+}
+
+#[tauri::command]
+async fn remote_delete_account_cmd(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    remote_client::delete_account(&url, &secret, &id).await
+}
+
+#[tauri::command]
+async fn remote_fetch_token(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<remote_client::RemoteToken, String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    remote_client::fetch_token(&url, &secret, &id).await
+}
+
+/// 按当前 settings 启动/重启 server 端 HTTP API（便于 UI 切换模式后不用重启 App）
+#[tauri::command]
+fn remote_restart_server(state: State<AppState>) -> Result<String, String> {
+    let (mode, port, bind, secret) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        (
+            store.settings.remote_mode.clone(),
+            store.settings.remote_server_port,
+            store.settings.remote_server_bind.clone(),
+            store.settings.remote_shared_secret.clone(),
+        )
+    };
+    // 停掉旧的
+    {
+        let mut slot = state
+            .remote_server_handle
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if let Some(h) = slot.take() {
+            h.abort();
+        }
+    }
+    if mode != "server" {
+        return Ok(format!("已停止（当前模式 {}）", mode));
+    }
+    if secret.is_empty() {
+        return Err("共享密钥为空，请先生成".to_string());
+    }
+    let handle = remote_server::spawn_remote_server(
+        state.store.clone(),
+        bind.clone(),
+        port,
+        secret,
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
+    let mut slot = state
+        .remote_server_handle
+        .lock()
+        .map_err(|e| e.to_string())?;
+    *slot = Some(handle);
+    Ok(format!("已启动 http://{}:{}", bind, port))
+}
+
+// ==================== end Remote Mode commands ====================
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2008,6 +2186,42 @@ pub fn run() {
                 println!("[Proxy] 代理已随应用启动 (端口 {})", proxy_port);
             } else {
                 println!("[Proxy] 本地代理未开启，跳过启动");
+            }
+
+            // 启动 Remote Mode HTTP API（仅在 mode=server 时）
+            let (remote_mode, remote_port, remote_bind, remote_secret) = state
+                .store
+                .lock()
+                .map(|s| {
+                    (
+                        s.settings.remote_mode.clone(),
+                        s.settings.remote_server_port,
+                        s.settings.remote_server_bind.clone(),
+                        s.settings.remote_shared_secret.clone(),
+                    )
+                })
+                .unwrap_or((
+                    "off".to_string(),
+                    18081,
+                    "0.0.0.0".to_string(),
+                    String::new(),
+                ));
+            if remote_mode == "server" {
+                if remote_secret.is_empty() {
+                    eprintln!("[RemoteServer] shared_secret 为空，拒绝启动（请在 UI 配置）");
+                } else {
+                    let handle = remote_server::spawn_remote_server(
+                        state.store.clone(),
+                        remote_bind,
+                        remote_port,
+                        remote_secret,
+                        env!("CARGO_PKG_VERSION").to_string(),
+                    );
+                    let mut slot = state.remote_server_handle.lock().unwrap();
+                    *slot = Some(handle);
+                }
+            } else {
+                println!("[RemoteServer] Remote Mode 未启用（mode={}）", remote_mode);
             }
 
             // 启动定时额度刷新
@@ -2097,6 +2311,16 @@ pub fn run() {
             fix_codex_quarantine,
             get_sync_status,
             sync_active_with_disk,
+            remote_generate_secret,
+            remote_health,
+            remote_test_auth,
+            remote_probe,
+            remote_push_account,
+            remote_push_all,
+            remote_pull_all,
+            remote_delete_account_cmd,
+            remote_fetch_token,
+            remote_restart_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

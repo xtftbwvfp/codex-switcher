@@ -36,6 +36,49 @@ use crate::token_tracker::TokenTracker;
 static PENDING_INJECT_MSG: std::sync::LazyLock<Mutex<Option<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
+/// client 模式下，per-account 的 token 短期缓存（避免每次请求都 round-trip Mini）
+struct RemoteTokenCacheEntry {
+    token: String,
+    is_chatgpt: bool,
+    at: std::time::Instant,
+}
+
+const REMOTE_TOKEN_CACHE_TTL_SECS: u64 = 30;
+
+static REMOTE_TOKEN_CACHE: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, RemoteTokenCacheEntry>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn remote_token_cache_get(id: &str) -> Option<(String, bool)> {
+    let g = REMOTE_TOKEN_CACHE.lock().ok()?;
+    let e = g.get(id)?;
+    if e.at.elapsed() < std::time::Duration::from_secs(REMOTE_TOKEN_CACHE_TTL_SECS) {
+        Some((e.token.clone(), e.is_chatgpt))
+    } else {
+        None
+    }
+}
+
+fn remote_token_cache_put(id: &str, token: &str, is_chatgpt: bool) {
+    if let Ok(mut g) = REMOTE_TOKEN_CACHE.lock() {
+        g.insert(
+            id.to_string(),
+            RemoteTokenCacheEntry {
+                token: token.to_string(),
+                is_chatgpt,
+                at: std::time::Instant::now(),
+            },
+        );
+    }
+}
+
+/// 切号或账号变化时手动失效（被 perform_switch 调用）
+pub fn invalidate_remote_token_cache() {
+    if let Ok(mut g) = REMOTE_TOKEN_CACHE.lock() {
+        g.clear();
+    }
+}
+
 /// ChatGPT OAuth 登录用的上游（免费/Plus/Team 账号）
 const CHATGPT_HOST: &str = "chatgpt.com";
 const CHATGPT_ORIGIN: &str = "https://chatgpt.com/backend-api/codex";
@@ -156,29 +199,63 @@ pub fn start(
 
 /// 获取当前账号最新的 access_token + 认证模式
 ///
-/// 安全策略：不主动刷新 token（避免与 Codex CLI 冲突），
-/// 但每次请求从 auth.json 回读，确保用到 Codex CLI 刷新后的最新值。
+/// 默认：从本地 store + ~/.codex/auth.json 回读最新值。
+/// client 模式：从 Mini 拉取新鲜 token，回写本地 store；失败则回退本地。
 ///
 /// 返回 (token, is_chatgpt_auth)
-fn get_current_token(state: &ProxyState) -> Result<(String, bool), String> {
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    let current_id = store.current.as_ref().ok_or("没有激活的账号")?.clone();
+async fn get_current_token(state: &ProxyState) -> Result<(String, bool), String> {
+    // 1) 从 store 取一小段快照，尽快释放锁
+    let (current_id, remote_mode, primary, fallback, secret) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let id = store.current.as_ref().ok_or("没有激活的账号")?.clone();
+        (
+            id,
+            store.settings.remote_mode.clone(),
+            store.settings.remote_mini_url.clone(),
+            store.settings.remote_mini_url_fallback.clone(),
+            store.settings.remote_shared_secret.clone(),
+        )
+    };
 
-    // 从 auth.json 回读最新 token（Codex CLI 可能已刷新）
+    // 2) client 模式：优先命中本地短缓存；miss 时去 Mini 拿新鲜 token
+    if remote_mode == "client" && !secret.is_empty() {
+        if let Some((tok, is_chatgpt)) = remote_token_cache_get(&current_id) {
+            return Ok((tok, is_chatgpt));
+        }
+        match crate::remote_client::resolve_base_url(&primary, &fallback).await {
+            Ok(base) => {
+                match crate::remote_client::fetch_token(&base, &secret, &current_id).await {
+                    Ok(t) => {
+                        // 回写本地 store，方便 UI 显示一致、quota 等字段也能看到
+                        if let Ok(mut store) = state.store.lock() {
+                            store.sync_account_from_auth_json(&current_id, t.auth_json.clone());
+                            let _ = store.save();
+                        }
+                        if let Some(tok) = AccountStore::extract_access_token(&t.auth_json) {
+                            let is_chatgpt = tok.starts_with("eyJ");
+                            remote_token_cache_put(&current_id, &tok, is_chatgpt);
+                            return Ok((tok, is_chatgpt));
+                        }
+                        eprintln!("[Proxy] Mini 返回的 auth_json 里没有 access_token");
+                    }
+                    Err(e) => eprintln!("[Proxy] client 模式 fetch_token 失败，回退本地: {}", e),
+                }
+            }
+            Err(e) => eprintln!("[Proxy] client 模式 Mini 不可达，回退本地: {}", e),
+        }
+    }
+
+    // 3) 默认路径：本地 store + ~/.codex/auth.json
+    let mut store = state.store.lock().map_err(|e| e.to_string())?;
     if let Ok(disk_auth) = AccountStore::read_codex_auth() {
         if store.sync_account_from_auth_json(&current_id, disk_auth) {
             let _ = store.save();
         }
     }
-
     let account = store.accounts.get(&current_id).ok_or("当前账号不存在")?;
-
     let token = AccountStore::extract_access_token(&account.auth_json)
         .ok_or_else(|| "当前账号缺少 access_token".to_string())?;
-
-    // 判断认证模式：JWT (eyJ...) = ChatGPT OAuth, sk-... = API key
     let is_chatgpt = token.starts_with("eyJ");
-
     Ok((token, is_chatgpt))
 }
 
@@ -389,6 +466,8 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
 
     store.switch_to(new_id)?;
     store.save()?;
+    // 切号后远端 token 缓存作废，下一次请求重新拉
+    invalidate_remote_token_cache();
 
     let to_name = store
         .accounts
@@ -481,7 +560,7 @@ async fn handle_request(
     }
 
     // 1. 获取当前 token + 认证模式
-    let (token, is_chatgpt) = match get_current_token(&state) {
+    let (token, is_chatgpt) = match get_current_token(&state).await {
         Ok(t) => t,
         Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
     };
@@ -673,7 +752,7 @@ async fn handle_request(
         } else {
             // 其他请求正在切号，短暂等待后用新 token 重试
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if let Ok((new_token, _)) = get_current_token(&state) {
+            if let Ok((new_token, _)) = get_current_token(&state).await {
                 if let Ok(retry_resp) = forward_with_token(
                     &state,
                     &method,
@@ -914,7 +993,7 @@ async fn handle_websocket(
     mut req: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     // 1. 获取 token 和上游地址
-    let (mut token, mut is_chatgpt) = match get_current_token(&state) {
+    let (mut token, mut is_chatgpt) = match get_current_token(&state).await {
         Ok(t) => t,
         Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
     };

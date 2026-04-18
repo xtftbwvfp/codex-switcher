@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Palette, Server, Monitor, Wrench, Save, Github } from 'lucide-react';
+import { Palette, Server, Monitor, Wrench, Save, Github, Radio } from 'lucide-react';
 import './Settings.css';
 
 interface AppSettings {
@@ -15,6 +15,18 @@ interface AppSettings {
     proxy_enabled: boolean;
     proxy_port: number;
     proxy_allow_lan: boolean;
+    remote_mode: string;
+    remote_server_port: number;
+    remote_server_bind: string;
+    remote_mini_url: string;
+    remote_mini_url_fallback: string;
+    remote_shared_secret: string;
+}
+
+interface RemoteHealth {
+    mode: string;
+    version: string;
+    account_count: number;
 }
 
 const IDE_OPTIONS = [
@@ -38,10 +50,18 @@ export function Settings() {
         proxy_enabled: false,
         proxy_port: 18080,
         proxy_allow_lan: false,
+        remote_mode: 'off',
+        remote_server_port: 18081,
+        remote_server_bind: '0.0.0.0',
+        remote_mini_url: '',
+        remote_mini_url_fallback: '',
+        remote_shared_secret: '',
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+    const [remoteBusy, setRemoteBusy] = useState(false);
+    const [remoteStatus, setRemoteStatus] = useState<string>('');
 
     useEffect(() => {
         loadSettings();
@@ -73,6 +93,56 @@ export function Settings() {
     const updateField = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
         setSettings(prev => ({ ...prev, [key]: value }));
     };
+
+    const withRemote = async (label: string, fn: () => Promise<string>) => {
+        setRemoteBusy(true);
+        setRemoteStatus('');
+        setMessage(null);
+        try {
+            const text = await fn();
+            setRemoteStatus(`✅ ${label}：${text}`);
+            setMessage({ type: 'success', text: `${label} 成功` });
+        } catch (e) {
+            setRemoteStatus(`❌ ${label} 失败：${e}`);
+            setMessage({ type: 'error', text: `${label} 失败：${e}` });
+        } finally {
+            setRemoteBusy(false);
+        }
+    };
+
+    const handleGenerateSecret = async () => {
+        try {
+            const s = await invoke<string>('remote_generate_secret');
+            updateField('remote_shared_secret', s);
+            setMessage({ type: 'success', text: '已生成新密钥，记得保存设置' });
+        } catch (e) {
+            setMessage({ type: 'error', text: `生成失败：${e}` });
+        }
+    };
+
+    const handleRemoteTest = () =>
+        withRemote('测试连接', async () => {
+            const [url, h] = await invoke<[string, RemoteHealth]>('remote_probe');
+            return `使用 ${url}，Mini v${h.version}，远端账号数 ${h.account_count}`;
+        });
+
+    const handleRemotePushAll = () =>
+        withRemote('推送全部账号到 Mini', async () => {
+            const n = await invoke<number>('remote_push_all');
+            return `已上传 ${n} 个账号`;
+        });
+
+    const handleRemotePullAll = () =>
+        withRemote('从 Mini 拉取全部账号', async () => {
+            const n = await invoke<number>('remote_pull_all');
+            return `已合并 ${n} 个账号`;
+        });
+
+    const handleRemoteRestart = () =>
+        withRemote('重启 HTTP 服务', async () => {
+            const s = await invoke<string>('remote_restart_server');
+            return s;
+        });
 
     const handleRepair = async () => {
         if (!confirm('这将尝试移除 Codex App 的安全隔离属性。\n\n系统可能会弹窗要求输入密码以获得权限。是否继续？')) {
@@ -254,6 +324,174 @@ export function Settings() {
                             </label>
                         </div>
                     </>
+                )}
+            </div>
+
+            <div className="settings-section">
+                <h3><Radio size={16} /> Remote Mode（局域网同步）</h3>
+
+                <div className="setting-item">
+                    <div className="setting-info">
+                        <span className="setting-label">工作模式</span>
+                        <span className="setting-desc">
+                            off=独立；server=本机作为 Mini 提供账号 API；client=从 Mini 拉取 token（保存后生效）
+                        </span>
+                    </div>
+                    <select
+                        className="select-input"
+                        value={settings.remote_mode}
+                        onChange={e => updateField('remote_mode', e.target.value)}
+                    >
+                        <option value="off">off（关闭）</option>
+                        <option value="server">server（Mini 侧）</option>
+                        <option value="client">client（本机）</option>
+                    </select>
+                </div>
+
+                {settings.remote_mode === 'server' && (
+                    <>
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">监听端口</span>
+                                <span className="setting-desc">Mini 侧 HTTP API 端口（默认 18081）</span>
+                            </div>
+                            <input
+                                type="number"
+                                className="number-input"
+                                min={1024}
+                                max={65535}
+                                value={settings.remote_server_port}
+                                onChange={e => updateField('remote_server_port', parseInt(e.target.value) || 18081)}
+                            />
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">绑定地址</span>
+                                <span className="setting-desc">0.0.0.0 监听所有网卡；建议仅暴露给 ZeroTier 网段</span>
+                            </div>
+                            <input
+                                type="text"
+                                className="text-input"
+                                value={settings.remote_server_bind}
+                                onChange={e => updateField('remote_server_bind', e.target.value)}
+                                placeholder="0.0.0.0"
+                            />
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">共享密钥</span>
+                                <span className="setting-desc">客户端访问需携带 X-Auth-Token；留空则拒绝所有请求</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <input
+                                    type="text"
+                                    className="text-input"
+                                    style={{ minWidth: 260, fontFamily: 'monospace', fontSize: 12 }}
+                                    value={settings.remote_shared_secret}
+                                    onChange={e => updateField('remote_shared_secret', e.target.value)}
+                                    placeholder="（未设置）"
+                                />
+                                <button
+                                    className="action-button"
+                                    onClick={handleGenerateSecret}
+                                    disabled={remoteBusy}
+                                >
+                                    生成
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">重启 HTTP 服务</span>
+                                <span className="setting-desc">修改端口/绑定/密钥后点此应用（保存设置后）</span>
+                            </div>
+                            <button
+                                className="action-button"
+                                onClick={handleRemoteRestart}
+                                disabled={remoteBusy}
+                            >
+                                {remoteBusy ? '执行中...' : '立即重启'}
+                            </button>
+                        </div>
+                    </>
+                )}
+
+                {settings.remote_mode === 'client' && (
+                    <>
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">Mini API 地址（主）</span>
+                                <span className="setting-desc">优先尝试，建议填局域网 IP，如 http://192.168.2.14:18081</span>
+                            </div>
+                            <input
+                                type="text"
+                                className="text-input"
+                                style={{ minWidth: 260 }}
+                                value={settings.remote_mini_url}
+                                onChange={e => updateField('remote_mini_url', e.target.value)}
+                                placeholder="http://192.168.2.14:18081"
+                            />
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">Mini API 地址（回退）</span>
+                                <span className="setting-desc">主不通时自动切换，建议填 ZeroTier IP，如 http://172.26.96.198:18081</span>
+                            </div>
+                            <input
+                                type="text"
+                                className="text-input"
+                                style={{ minWidth: 260 }}
+                                value={settings.remote_mini_url_fallback}
+                                onChange={e => updateField('remote_mini_url_fallback', e.target.value)}
+                                placeholder="http://172.26.96.198:18081"
+                            />
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">共享密钥</span>
+                                <span className="setting-desc">必须与 Mini 端一致</span>
+                            </div>
+                            <input
+                                type="text"
+                                className="text-input"
+                                style={{ minWidth: 260, fontFamily: 'monospace', fontSize: 12 }}
+                                value={settings.remote_shared_secret}
+                                onChange={e => updateField('remote_shared_secret', e.target.value)}
+                                placeholder="（未设置）"
+                            />
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">同步操作</span>
+                                <span className="setting-desc">测试连通性 / 推送本机账号 / 从 Mini 合并</span>
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                <button className="action-button" onClick={handleRemoteTest} disabled={remoteBusy}>
+                                    测试连接
+                                </button>
+                                <button className="action-button" onClick={handleRemotePushAll} disabled={remoteBusy}>
+                                    推送全部
+                                </button>
+                                <button className="action-button" onClick={handleRemotePullAll} disabled={remoteBusy}>
+                                    拉取合并
+                                </button>
+                            </div>
+                        </div>
+                    </>
+                )}
+
+                {remoteStatus && (
+                    <div className="setting-item sub-item">
+                        <span className="setting-desc" style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                            {remoteStatus}
+                        </span>
+                    </div>
                 )}
             </div>
 

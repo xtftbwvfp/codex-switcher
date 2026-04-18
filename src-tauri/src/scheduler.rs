@@ -50,16 +50,24 @@ pub fn start(
         println!("✅ 后台调度器已启动");
 
         loop {
-            let (enabled, interval_minutes, inactive_refresh_days) = {
+            let (enabled, interval_minutes, inactive_refresh_days, remote_mode) = {
                 let store = store.lock().unwrap();
                 (
                     store.settings.background_refresh,
                     store.settings.refresh_interval_minutes,
                     store.settings.inactive_refresh_days,
+                    store.settings.remote_mode.clone(),
                 )
             };
 
             if !enabled {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+
+            // client 模式下：保活交给 Mini，本机只做 auth.json 反向同步，不独占刷新
+            if remote_mode == "client" {
+                println!("[Scheduler] client 模式：跳过本机保活，Mini 负责刷新");
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 continue;
             }
