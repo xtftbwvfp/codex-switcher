@@ -1,0 +1,192 @@
+.cache-panel {
+    padding: 20px 24px 40px;
+    color: #e8e8e8;
+    overflow-y: auto;
+    height: 100%;
+}
+
+.cache-loading {
+    text-align: center;
+    color: #888;
+    padding: 40px;
+}
+
+.cache-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 18px;
+}
+
+.cache-header h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.cache-controls {
+    display: flex;
+    gap: 8px;
+}
+
+.cache-controls select,
+.cache-controls button {
+    background: #2a2a2a;
+    border: 1px solid #3a3a3a;
+    color: #e8e8e8;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.cache-controls button:hover,
+.cache-controls select:hover {
+    background: #333;
+}
+
+.cache-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #aaa;
+    font-size: 12px;
+    cursor: pointer;
+    user-select: none;
+    padding: 0 4px;
+}
+
+.cache-toggle input[type=checkbox] {
+    margin: 0;
+    cursor: pointer;
+}
+
+/* 旧数据行：整行灰一档 */
+.cache-row-unknown td {
+    color: #666 !important;
+    font-style: italic;
+}
+.cache-row-unknown .cache-cached,
+.cache-row-unknown .cache-saved {
+    color: #4a4a4a !important;
+}
+
+/* KPI 行 */
+.cache-kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.kpi-tile {
+    border-radius: 8px;
+    padding: 14px 16px;
+    background: #1f1f1f;
+    border: 1px solid #2c2c2c;
+    position: relative;
+    overflow: hidden;
+}
+
+.kpi-tile::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 3px;
+}
+
+.kpi-green::before    { background: #10b981; }
+.kpi-blue::before     { background: #3b82f6; }
+.kpi-purple::before   { background: #8b5cf6; }
+.kpi-orange::before   { background: #f59e0b; }
+
+.kpi-label {
+    font-size: 12px;
+    color: #999;
+    margin-bottom: 6px;
+}
+
+.kpi-value {
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.2;
+    margin-bottom: 4px;
+}
+
+.kpi-sub {
+    font-size: 11px;
+    color: #666;
+}
+
+/* 卡片 */
+.cache-card {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+
+.cache-card-title {
+    font-size: 13px;
+    color: #aaa;
+    margin-bottom: 10px;
+    font-weight: 500;
+}
+
+.cache-empty {
+    color: #666;
+    font-size: 13px;
+    padding: 24px 0;
+    text-align: center;
+}
+
+/* 表格 */
+.cache-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.cache-table thead th {
+    text-align: left;
+    color: #888;
+    font-weight: 500;
+    padding: 6px 8px;
+    border-bottom: 1px solid #2c2c2c;
+}
+
+.cache-table tbody td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #232323;
+}
+
+.cache-table tbody tr:hover {
+    background: #1f1f1f;
+}
+
+.cache-table-name {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    color: #cfcfcf;
+}
+
+.cache-table-key {
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    color: #999;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cache-cached {
+    color: #10b981;
+    font-weight: 500;
+}
+
+.cache-saved {
+    color: #3b82f6;
+    font-weight: 500;
+}

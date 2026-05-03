@@ -23,6 +23,7 @@ export interface AppSettings {
     refresh_interval_minutes: number;
     inactive_refresh_days: number;
     theme_palette: string;
+    remote_mode?: string;
 }
 
 export interface KeepaliveState {
@@ -144,11 +145,10 @@ export function useAccounts() {
         }
     }, [loadData]);
 
-    // 删除账号（带确认）
+    // 删除账号
+    // 注意：不在这里做 confirm —— 上层 UI (AccountList ConfirmModal / AccountCard 二次点击)
+    // 已经承担确认职责；这里再弹 window.confirm 会变成双弹框。
     const deleteAccount = useCallback(async (id: string) => {
-        const account = accounts.find(a => a.id === id);
-        const name = account?.name || id;
-        if (!window.confirm(`确定要删除账号 ${name} 吗？`)) return;
         try {
             setError(null);
             if (currentId === id) {
@@ -160,7 +160,7 @@ export function useAccounts() {
             setError(String(err));
             throw err;
         }
-    }, [loadData, accounts, currentId]);
+    }, [loadData, currentId]);
 
     // 更新账号
     const updateAccount = useCallback(async (id: string, name?: string, notes?: string) => {

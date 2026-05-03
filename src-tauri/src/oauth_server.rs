@@ -25,6 +25,7 @@ fn get_callback_task() -> &'static Mutex<Option<tokio::task::JoinHandle<()>>> {
 struct PendingLogin {
     pkce: oauth::PkceCodes,
     port: u16,
+    state: String,
 }
 
 /// 生成与官方一致的 state (Base64 编码的32字节随机数)
@@ -85,6 +86,7 @@ pub async fn start_oauth_login(app_handle: AppHandle) -> Result<String, String> 
         *pending = Some(PendingLogin {
             pkce: pkce.clone(),
             port,
+            state: state.clone(),
         });
     }
 
@@ -178,6 +180,86 @@ fn extract_oauth_code_from_request(request: &str, expected_state: &str) -> Optio
     }
 
     Some(code.to_string())
+}
+
+/// 手动粘贴回调链接或裸 code 提交。适用于浏览器没能跳回本机监听端口（走了代理、被防火墙拦截等）。
+/// 接受的 input 形式：
+/// - 完整 URL: `http://localhost:1455/auth/callback?code=XXX&state=YYY`
+/// - query 串:  `?code=XXX&state=YYY` 或 `code=XXX&state=YYY`
+/// - 裸 code（不推荐，不做 state 校验）
+#[tauri::command]
+pub async fn submit_oauth_callback(
+    app_handle: AppHandle,
+    input: String,
+) -> Result<(), String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("回调链接不能为空".to_string());
+    }
+
+    // 尝试按 URL 解析；失败则按 query 串处理；都失败就当作裸 code
+    let (code_opt, state_opt) = parse_callback_input(trimmed);
+
+    let Some(code) = code_opt else {
+        return Err("未能从输入中解析出 code 参数".to_string());
+    };
+
+    // 有 state 就校验；没 state 的裸 code 也接受（用户自己承担风险）
+    if let Some(ref provided_state) = state_opt {
+        let expected = {
+            let guard = get_pending_login().lock().map_err(|_| "登录流程状态锁异常")?;
+            guard.as_ref().map(|p| p.state.clone())
+        };
+        match expected {
+            Some(expected) if expected != *provided_state => {
+                return Err("state 校验不通过：这个回调链接不属于本次登录流程".to_string());
+            }
+            None => {
+                return Err("登录流程已过期或未启动，请先点击『立即登录 OpenAI』".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // 停掉后端 HTTP 监听，避免它再接收一个回调
+    if let Ok(mut slot) = get_callback_task().lock() {
+        if let Some(task) = slot.take() {
+            task.abort();
+        }
+    }
+
+    // 走跟 HTTP 监听完全相同的路径：把 code 丢到前端
+    app_handle
+        .emit("oauth-callback-received", code)
+        .map_err(|e| format!("派发 oauth-callback-received 失败: {}", e))?;
+    Ok(())
+}
+
+fn parse_callback_input(input: &str) -> (Option<String>, Option<String>) {
+    // 1) 完整 URL
+    if let Ok(url) = Url::parse(input) {
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        if let Some(code) = params.get("code") {
+            return (Some(code.clone()), params.get("state").cloned());
+        }
+    }
+    // 2) 以 ? 开头或形如 code=xxx&state=yyy 的 query 串
+    let stripped = input.trim_start_matches('?');
+    if stripped.contains('=') {
+        let fake = format!("http://x/?{}", stripped);
+        if let Ok(url) = Url::parse(&fake) {
+            let params: std::collections::HashMap<_, _> =
+                url.query_pairs().into_owned().collect();
+            if let Some(code) = params.get("code") {
+                return (Some(code.clone()), params.get("state").cloned());
+            }
+        }
+    }
+    // 3) 裸 code：只要不含空白就认作 code
+    if !input.chars().any(char::is_whitespace) {
+        return (Some(input.to_string()), None);
+    }
+    (None, None)
 }
 
 /// 最后一步：使用捕获到的 Code 交换 Token (由前端触发)

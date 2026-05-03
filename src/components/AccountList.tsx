@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Zap, RefreshCw, ArrowLeftRight, Trash2, Clock, ShieldCheck, ShieldOff } from 'lucide-react';
+import { Zap, RefreshCw, ArrowLeftRight, Trash2, Clock, UploadCloud } from 'lucide-react';
 import { Account, AppSettings } from '../hooks/useAccounts';
 import { invoke } from '@tauri-apps/api/core';
 import { useShortCountdown } from '../hooks/useCountdown';
@@ -19,7 +19,7 @@ interface UsageData {
     is_valid_for_cli: boolean;
 }
 
-type FilterType = 'all' | 'plus' | 'team' | 'free';
+type FilterType = 'all' | 'plus' | 'pro' | 'team' | 'free';
 
 interface AccountListProps {
     accounts: Account[];
@@ -27,7 +27,6 @@ interface AccountListProps {
     settings: AppSettings;
     onSwitch: (id: string) => void | Promise<void>;
     onDelete: (id: string) => void;
-    onSetInactiveRefreshEnabled: (id: string, enabled: boolean) => void;
     onUpdateSettings: (settings: AppSettings) => void;
     onRefreshComplete?: () => void;
     onAddAccount?: () => void;
@@ -44,7 +43,6 @@ export function AccountList({
     onRefreshUsage,
     usageLoading,
     onDelete,
-    onSetInactiveRefreshEnabled,
     onUpdateSettings,
     onRefreshComplete,
 }: AccountListProps) {
@@ -59,6 +57,8 @@ export function AccountList({
     const [invalidIds, setInvalidIds] = useState<Set<string>>(new Set());
     const [bannedIds, setBannedIds] = useState<Set<string>>(new Set());
     const [accountToDelete, setAccountToDelete] = useState<{ id: string, name: string } | null>(null);
+    const [pushingIds, setPushingIds] = useState<Set<string>>(new Set());
+    const [pushToast, setPushToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
     const autoReload = settings.auto_reload_ide;
     const setAutoReload = (val: boolean) => onUpdateSettings({ ...settings, auto_reload_ide: val });
@@ -114,9 +114,10 @@ export function AccountList({
         if (filter !== 'all') {
             result = result.filter(a => {
                 const type = usageMap[a.id]?.plan_type?.toLowerCase() || '';
+                if (filter === 'pro') return type.includes('pro'); // 含 pro / prolite
                 if (filter === 'plus') return type.includes('plus');
                 if (filter === 'team') return type.includes('team');
-                if (filter === 'free') return type && !type.includes('plus') && !type.includes('team');
+                if (filter === 'free') return type && !type.includes('pro') && !type.includes('plus') && !type.includes('team');
                 return true;
             });
         }
@@ -124,10 +125,11 @@ export function AccountList({
     }, [accounts, searchQuery, filter, usageMap]);
 
     const filterCounts = useMemo(() => {
-        const counts = { all: accounts.length, plus: 0, team: 0, free: 0 };
+        const counts = { all: accounts.length, pro: 0, plus: 0, team: 0, free: 0 };
         accounts.forEach(a => {
             const type = usageMap[a.id]?.plan_type?.toLowerCase() || '';
-            if (type.includes('plus')) counts.plus++;
+            if (type.includes('pro')) counts.pro++;
+            else if (type.includes('plus')) counts.plus++;
             else if (type.includes('team')) counts.team++;
             else if (type) counts.free++;
         });
@@ -153,21 +155,43 @@ export function AccountList({
 
     const getStatusInfo = (account: Account) => {
         const isCurrent = account.id === currentId;
-        const enabled = account.keepalive?.inactive_refresh_enabled !== false;
         const err = account.keepalive?.last_error;
         const isPermanent = err?.toLowerCase().match(/reused|invalidated|expired/);
 
         if (isPermanent) return { text: '过期', warn: true };
         if (isCurrent) return { text: '当前账号', warn: false };
-        if (!enabled) return { text: '已停用', warn: true };
-        return { text: err ? '重试中' : '已启用', warn: !!err };
+        return { text: err ? '重试中' : '正常', warn: !!err };
+    };
+
+    const handlePushToServer = async (id: string, name: string) => {
+        setPushingIds(prev => new Set(prev).add(id));
+        try {
+            const r = await invoke<{ ok: boolean; id: string; upserted: string; quota_refreshed?: boolean }>(
+                'remote_push_account',
+                { id }
+            );
+            const actionText =
+                r.upserted === 'created' ? '新增'
+                : r.upserted === 'merged' ? '合并到同邮箱旧账号'
+                : '更新';
+            const quotaText = r.quota_refreshed ? '，已刷新额度' : '';
+            setPushToast({ type: 'success', text: `${name} 推送 Server 成功（${actionText}${quotaText}）` });
+        } catch (e) {
+            setPushToast({ type: 'error', text: `${name} 推送失败: ${e}` });
+        } finally {
+            setPushingIds(prev => { const n = new Set(prev); n.delete(id); return n; });
+            setTimeout(() => setPushToast(null), 4000);
+        }
     };
 
     // 交互处理
     const handleRefreshOne = async (id: string) => {
         setRefreshingIds(prev => new Set(prev).add(id));
         try {
-            const usage = await invoke<UsageData>('get_quota_by_id', { id });
+            const cmd = settings.remote_mode === 'client'
+                ? 'remote_refresh_account_quota'
+                : 'get_quota_by_id';
+            const usage = await invoke<UsageData>(cmd, { id });
             setUsageMap(prev => ({ ...prev, [id]: usage }));
             setInvalidIds(prev => {
                 const next = new Set(prev);
@@ -224,7 +248,7 @@ export function AccountList({
                     <input type="text" placeholder="搜索邮箱..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
                 </div>
                 <div className="filter-group">
-                    {(['all', 'plus', 'team', 'free'] as const).map(t => (
+                    {(['all', 'pro', 'plus', 'team', 'free'] as const).map(t => (
                         <button key={t} className={`filter-btn ${filter === t ? 'active' : ''}`} onClick={() => setFilter(t)}>
                             {t.toUpperCase()} <span className="filter-count">{filterCounts[t]}</span>
                         </button>
@@ -325,9 +349,14 @@ export function AccountList({
                                 </div>
                                 <div className="col-actions">
                                     <button className="action-btn refresh" onClick={() => handleRefreshOne(acc.id)} disabled={isRefreshing} title="刷新"><RefreshCw size={14} className={isRefreshing ? 'spinning' : ''} /></button>
-                                    {!isCurrent && (
-                                        <button className={`action-btn keepalive ${acc.keepalive?.inactive_refresh_enabled !== false ? 'on' : 'off'}`} onClick={() => onSetInactiveRefreshEnabled(acc.id, acc.keepalive?.inactive_refresh_enabled === false)} title="保活">
-                                            {acc.keepalive?.inactive_refresh_enabled !== false ? <ShieldCheck size={14} /> : <ShieldOff size={14} />}
+                                    {settings.remote_mode === 'client' && (
+                                        <button
+                                            className="action-btn push"
+                                            onClick={() => handlePushToServer(acc.id, acc.name)}
+                                            disabled={pushingIds.has(acc.id)}
+                                            title="推送到 Server"
+                                        >
+                                            <UploadCloud size={14} className={pushingIds.has(acc.id) ? 'spinning' : ''} />
                                         </button>
                                     )}
                                     {!isCurrent && (
@@ -344,6 +373,11 @@ export function AccountList({
             <div className="account-list-footer">
                 <span>共 {filteredAccounts.length} 个账号</span>
                 {selectedIds.size > 0 && <span className="selected-info">已选 {selectedIds.size} 个</span>}
+                {pushToast && (
+                    <span className={`push-toast ${pushToast.type}`} style={{ marginLeft: 'auto' }}>
+                        {pushToast.text}
+                    </span>
+                )}
             </div>
 
             <ConfirmModal

@@ -13,10 +13,11 @@ import { Settings } from './components/Settings';
 import { Proxy } from './components/Proxy';
 import { Stats } from './components/Stats';
 import { Skills } from './components/Skills';
+import CachePanel from './components/CachePanel';
 import { ConfirmModal } from './components/ConfirmModal';
 import './App.css';
 
-type PageType = 'dashboard' | 'accounts' | 'proxy' | 'stats' | 'skills' | 'settings';
+type PageType = 'dashboard' | 'accounts' | 'proxy' | 'stats' | 'cache' | 'skills' | 'settings';
 
 function App() {
   const {
@@ -29,7 +30,6 @@ function App() {
     importCurrent,
     switchTo,
     deleteAccount,
-    setInactiveRefreshEnabled,
     exportAccounts,
     reloadIdeWindows,
     updateSettings,
@@ -295,7 +295,7 @@ function App() {
           <div className="app-logo">
             <Zap size={18} />
           </div>
-          <h1>Codex Switcher <span className="app-version">v0.3.0</span></h1>
+          <h1>Codex Switcher <span className="app-version">v0.3.5</span></h1>
           <div className={`proxy-indicator ${proxyRunning ? 'on' : 'off'}`} title={proxyRunning ? '代理运行中' : '代理未启动'}>
             <span className="proxy-dot" />
             {proxyRunning ? 'Proxy ON' : 'Proxy OFF'}
@@ -327,6 +327,12 @@ function App() {
             onClick={() => setCurrentPage('stats')}
           >
             统计
+          </button>
+          <button
+            className={`nav-item ${currentPage === 'cache' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('cache')}
+          >
+            缓存
           </button>
           <button
             className={`nav-item ${currentPage === 'skills' ? 'active' : ''}`}
@@ -392,6 +398,18 @@ function App() {
                 console.error('导入失败:', err);
               }
             }}
+            onForceOverwriteDisk={async () => {
+              try {
+                await invoke<string>('force_overwrite_disk_with_current');
+                if (settings.auto_reload_ide) {
+                  await reloadIdeWindows(false);
+                }
+                checkSyncStatus();
+                refreshUsage();
+              } catch (err) {
+                console.error('覆盖 ~/.codex/auth.json 失败:', err);
+              }
+            }}
           />
         ) : currentPage === 'accounts' ? (
           <AccountList
@@ -400,7 +418,6 @@ function App() {
             settings={settings}
             onSwitch={handleSwitch}
             onDelete={deleteAccount}
-            onSetInactiveRefreshEnabled={setInactiveRefreshEnabled}
             onUpdateSettings={updateSettings}
             onRefreshComplete={refresh}
             onAddAccount={() => setShowAddModal(true)}
@@ -411,6 +428,8 @@ function App() {
           <Proxy />
         ) : currentPage === 'stats' ? (
           <Stats />
+        ) : currentPage === 'cache' ? (
+          <CachePanel accounts={accounts.map(a => ({ id: a.id, name: a.name }))} />
         ) : currentPage === 'skills' ? (
           <Skills />
         ) : (

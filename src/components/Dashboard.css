@@ -243,3 +243,43 @@
         opacity: 1;
     }
 }
+/* ======================================================
+   身份不匹配面板（替代 UsageCard 的 retry 红字）
+   ====================================================== */
+.mismatch-panel {
+    margin: 12px 0;
+    padding: 14px 16px;
+    border: 1px solid rgba(248, 113, 113, 0.4);
+    background: rgba(248, 113, 113, 0.07);
+    border-radius: 12px;
+}
+
+.mismatch-headline {
+    font-size: 13px;
+    font-weight: 600;
+    color: #f87171;
+    margin-bottom: 6px;
+}
+
+.mismatch-detail {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    line-height: 1.5;
+}
+
+.mismatch-detail .mono {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    padding: 1px 6px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+}
+
+.mismatch-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}

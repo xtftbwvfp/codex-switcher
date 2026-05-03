@@ -35,6 +35,10 @@ interface AppSettings {
     quota_refresh_enabled: boolean;
     quota_refresh_interval: number;
     quota_refresh_batch: number;
+    switch_mode: string;
+    remote_mode: string;
+    proxy_bootstrap_byte_cap: number;
+    proxy_bootstrap_time_cap_ms: number;
 }
 
 export function Proxy() {
@@ -227,6 +231,29 @@ export function Proxy() {
                         <span className="toggle-slider"></span>
                     </label>
                 </div>
+
+                <div className="setting-item sub-item">
+                    <div className="setting-info">
+                        <span className="setting-label">切号模式</span>
+                        <span className="setting-desc">
+                            auto：代理开启时自动走热切（不写 auth.json，不杀进程，仅刷 store.current）。
+                            代理关闭时回退到冷切。cold：无论如何都冷切。
+                        </span>
+                    </div>
+                    <select
+                        className="select-input"
+                        value={settings?.switch_mode ?? 'auto'}
+                        onChange={async e => {
+                            if (!settings) return;
+                            const updated = { ...settings, switch_mode: e.target.value };
+                            setSettings(updated);
+                            await invoke('update_settings', { settings: updated });
+                        }}
+                    >
+                        <option value="auto">auto（代理开=热切）</option>
+                        <option value="cold">cold（强制冷切）</option>
+                    </select>
+                </div>
             </div>
 
             {/* 环境变量配置 */}
@@ -306,12 +333,17 @@ export function Proxy() {
                 <div className="setting-item">
                     <div className="setting-info">
                         <span className="setting-label">自动刷新账号额度</span>
-                        <span className="setting-desc">按最后更新时间排序，自动循环刷新所有账号的配额数据</span>
+                        <span className="setting-desc">
+                            {settings?.remote_mode === 'client'
+                                ? 'client 模式：本机不跑 oauth，改为从 Server /quotas 自动同步 cached_quota（约 5 分钟一轮）'
+                                : '按最后更新时间排序，自动循环刷新所有账号的配额数据'}
+                        </span>
                     </div>
                     <label className="toggle">
                         <input
                             type="checkbox"
-                            checked={settings?.quota_refresh_enabled ?? false}
+                            checked={settings?.remote_mode === 'client' ? false : (settings?.quota_refresh_enabled ?? false)}
+                            disabled={settings?.remote_mode === 'client'}
                             onChange={async e => {
                                 if (!settings) return;
                                 const updated = { ...settings, quota_refresh_enabled: e.target.checked };
@@ -322,7 +354,7 @@ export function Proxy() {
                         <span className="toggle-slider"></span>
                     </label>
                 </div>
-                {settings?.quota_refresh_enabled && (
+                {settings?.quota_refresh_enabled && settings?.remote_mode !== 'client' && (
                     <>
                         <div className="setting-item sub-item">
                             <div className="setting-info">
@@ -527,6 +559,59 @@ export function Proxy() {
                             }}
                         />
                         <span className="threshold-unit">%</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* SSE Bootstrap 上限：嗅探 mid-stream 限额事件的窗口大小 */}
+            <div className="settings-card">
+                <h3 className="card-title">SSE Bootstrap 嗅探窗口</h3>
+                <div className="setting-item-row">
+                    <div className="setting-item-info">
+                        <span className="setting-label">字节上限</span>
+                        <span className="setting-desc">读到这么多字节还没见到内容事件就放行（默认 32768）</span>
+                    </div>
+                    <div className="threshold-input-group">
+                        <input
+                            type="number"
+                            className="number-input"
+                            min={4096}
+                            max={1048576}
+                            step={4096}
+                            value={settings?.proxy_bootstrap_byte_cap ?? 32768}
+                            onChange={e => {
+                                if (!settings) return;
+                                const val = parseInt(e.target.value) || 32768;
+                                const updated = { ...settings, proxy_bootstrap_byte_cap: val };
+                                setSettings(updated);
+                                invoke('update_settings', { settings: updated });
+                            }}
+                        />
+                        <span className="threshold-unit">B</span>
+                    </div>
+                </div>
+                <div className="setting-item-row">
+                    <div className="setting-item-info">
+                        <span className="setting-label">时间上限</span>
+                        <span className="setting-desc">配合 SSE keep-alive 心跳可以放心拉大（默认 8000ms）</span>
+                    </div>
+                    <div className="threshold-input-group">
+                        <input
+                            type="number"
+                            className="number-input"
+                            min={1000}
+                            max={60000}
+                            step={500}
+                            value={settings?.proxy_bootstrap_time_cap_ms ?? 8000}
+                            onChange={e => {
+                                if (!settings) return;
+                                const val = parseInt(e.target.value) || 8000;
+                                const updated = { ...settings, proxy_bootstrap_time_cap_ms: val };
+                                setSettings(updated);
+                                invoke('update_settings', { settings: updated });
+                            }}
+                        />
+                        <span className="threshold-unit">ms</span>
                     </div>
                 </div>
             </div>

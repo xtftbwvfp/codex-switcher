@@ -4,13 +4,17 @@
 
 mod account;
 mod ide_control;
-mod oauth;
+pub mod mailbox;
+pub mod oauth;
 mod oauth_server;
+pub mod otp_login;
+pub mod sentinel;
 mod proxy;
 mod refresh_lock;
 mod remote_client;
 mod remote_server;
 mod scheduler;
+mod session_affinity;
 mod skills;
 mod switch_log;
 mod token_tracker;
@@ -75,9 +79,11 @@ pub struct AppState {
     /// 切号时通知所有 WebSocket 连接断开重连
     pub ws_disconnect: std::sync::Arc<tokio::sync::Notify>,
     pub switch_logger: std::sync::Arc<switch_log::SwitchLogger>,
+    pub session_affinity: std::sync::Arc<session_affinity::SessionAffinity>,
     pub quota_refresh_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     pub refresh_locks: RefreshLockManager,
     pub remote_server_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    pub solo_heartbeat_handle: std::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     quarantine_fix_ticket: std::sync::Mutex<Option<QuarantineFixTicket>>,
 }
 
@@ -91,9 +97,11 @@ impl AppState {
             token_tracker: token_tracker::TokenTracker::new(),
             ws_disconnect: std::sync::Arc::new(tokio::sync::Notify::new()),
             switch_logger: switch_log::SwitchLogger::new(),
+            session_affinity: std::sync::Arc::new(session_affinity::SessionAffinity::new()),
             quota_refresh_handle: std::sync::Mutex::new(None),
             refresh_locks: RefreshLockManager::default(),
             remote_server_handle: std::sync::Mutex::new(None),
+            solo_heartbeat_handle: std::sync::Mutex::new(None),
             quarantine_fix_ticket: std::sync::Mutex::new(None),
         }
     }
@@ -243,14 +251,21 @@ fn get_proxy_status(state: State<AppState>) -> Result<ProxyStatus, String> {
 fn update_settings(
     state: State<AppState>,
     app: tauri::AppHandle,
-    settings: account::AppSettings,
+    mut settings: account::AppSettings,
 ) -> Result<(), String> {
+    // client 模式硬约束：本机不做保活（保活由 Server 负责）
+    // quota_refresh_enabled 在 client 模式下被用作"Server 状态同步循环"的开关；
+    // 即使用户把它关掉，我们也始终会启动该循环（见下面启动条件）。
+    if settings.remote_mode == "client" {
+        settings.background_refresh = false;
+    }
     let (
         prev_bg_refresh,
         prev_proxy_enabled,
         prev_proxy_port,
         prev_proxy_allow_lan,
         prev_quota_refresh,
+        prev_remote_mode,
     ) = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let prev = (
@@ -259,6 +274,7 @@ fn update_settings(
             store.settings.proxy_port,
             store.settings.proxy_allow_lan,
             store.settings.quota_refresh_enabled,
+            store.settings.remote_mode.clone(),
         );
         store.settings = settings.clone();
         store.save()?;
@@ -301,6 +317,7 @@ fn update_settings(
                     state.token_tracker.clone(),
                     state.ws_disconnect.clone(),
                     state.switch_logger.clone(),
+                    state.session_affinity.clone(),
                 );
                 *proxy_handle = Some(handle);
                 println!("[Proxy] 代理已启动 (端口 {})", settings.proxy_port);
@@ -325,6 +342,7 @@ fn update_settings(
                 state.token_tracker.clone(),
                 state.ws_disconnect.clone(),
                 state.switch_logger.clone(),
+                state.session_affinity.clone(),
             );
             *proxy_handle = Some(handle);
             println!(
@@ -336,25 +354,56 @@ fn update_settings(
     }
 
     // 定时额度刷新生命周期
+    // - 非 client 模式：遵循 quota_refresh_enabled
+    // - client 模式：无条件运行（它同时承担 Server 状态同步的职责）
     let mut qr_handle = state
         .quota_refresh_handle
         .lock()
         .map_err(|e| e.to_string())?;
-    match (prev_quota_refresh, settings.quota_refresh_enabled) {
+    let is_client = settings.remote_mode == "client";
+    let prev_should_run = prev_quota_refresh; // 旧语义里 client 模式被强制 false，所以这里就是 enabled
+    let next_should_run = settings.quota_refresh_enabled || is_client;
+    match (prev_should_run, next_should_run) {
         (false, true) => {
             if qr_handle.is_none() {
                 let handle = start_quota_refresh(state.store.clone(), app.clone());
                 *qr_handle = Some(handle);
-                println!("[QuotaRefresh] 定时额度刷新已启动");
+                println!(
+                    "[QuotaRefresh] 循环已启动（enabled={} client={}）",
+                    settings.quota_refresh_enabled, is_client
+                );
             }
         }
         (true, false) => {
             if let Some(handle) = qr_handle.take() {
                 handle.abort();
-                println!("[QuotaRefresh] 定时额度刷新已停止");
+                println!("[QuotaRefresh] 循环已停止");
             }
         }
         _ => {}
+    }
+
+    // solo 心跳循环生命周期：remote_mode 进/出 "solo" 时启停
+    {
+        let mut slot = state.solo_heartbeat_handle.lock().map_err(|e| e.to_string())?;
+        let was_solo = prev_remote_mode == "solo";
+        let is_solo = settings.remote_mode == "solo";
+        match (was_solo, is_solo) {
+            (false, true) => {
+                if slot.is_none() {
+                    let h = start_solo_heartbeat(state.store.clone(), app.clone());
+                    *slot = Some(h);
+                    println!("[Solo] 心跳循环启动（settings）");
+                }
+            }
+            (true, false) => {
+                if let Some(h) = slot.take() {
+                    h.abort();
+                    println!("[Solo] 心跳循环停止（settings）");
+                }
+            }
+            _ => {}
+        }
     }
 
     app.emit("settings-updated", ()).ok();
@@ -410,7 +459,22 @@ fn check_sync_conflict(state: State<AppState>) -> Result<Option<String>, String>
 
 /// 删除账号
 #[tauri::command]
-fn delete_account(state: State<AppState>, app: tauri::AppHandle, id: String) -> Result<(), String> {
+async fn delete_account(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    // 先取一份快照：client 模式下需要把删号指令同步给 Server
+    let (remote_mode, primary, fallback, secret) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        (
+            store.settings.remote_mode.clone(),
+            store.settings.remote_server_url.clone(),
+            store.settings.remote_server_url_fallback.clone(),
+            store.settings.remote_shared_secret.clone(),
+        )
+    };
+
     {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         if store.current.as_deref() == Some(&id) {
@@ -418,8 +482,20 @@ fn delete_account(state: State<AppState>, app: tauri::AppHandle, id: String) -> 
         }
         store.delete_account(&id)?;
         store.save()?;
-    } // 锁在这里释放
-      // 联动刷新托盘菜单（需要重新获取锁，不会死锁）
+    }
+
+    // client / solo 模式：同步删除 Server 上的对应账号（失败不影响本地删除已完成的事实）
+    if account::pushes_to_server(&remote_mode) && !secret.is_empty() {
+        match remote_client::resolve_base_url(&primary, &fallback).await {
+            Ok(base) => {
+                if let Err(e) = remote_client::delete_account(&base, &secret, &id).await {
+                    eprintln!("[DeleteAccount] Server 端联动删除失败（本地已删除）: {}", e);
+                }
+            }
+            Err(e) => eprintln!("[DeleteAccount] Server 不可达（本地已删除）: {}", e),
+        }
+    }
+
     crate::tray::update_tray_menu(&app);
     Ok(())
 }
@@ -486,14 +562,14 @@ fn import_accounts(
     Ok(())
 }
 
-/// 完成 OAuth 登录并保存账号
-#[tauri::command]
-async fn finalize_oauth_login(
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-    code: String,
+/// 把已经拿到的 OAuth Token 落进账号库 + 推 Server + 刷托盘。
+/// 浏览器登录和 OTP 自动登录都走这一条路。
+async fn save_token_as_account(
+    state: &tauri::State<'_, AppState>,
+    app: &tauri::AppHandle,
+    token_res: oauth::TokenResponse,
+    notes: Option<String>,
 ) -> Result<Account, String> {
-    let token_res = oauth_server::complete_oauth_login(code).await?;
     if token_res.refresh_token.is_none() {
         return Err("OAuth 未返回 refresh_token，无法自动续期".to_string());
     }
@@ -504,7 +580,7 @@ async fn finalize_oauth_login(
         .and_then(|id_t| oauth::parse_user_info(id_t))
         .ok_or("无法从授权响应中解析用户信息 (Missing ID Token)")?;
 
-    let account = {
+    let (account, is_client_mode) = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
 
         let expires_at = token_res
@@ -522,11 +598,7 @@ async fn finalize_oauth_login(
             "last_refresh": chrono::Utc::now().to_rfc3339()
         });
 
-        let mut account = store.add_account(
-            user_info.email,
-            auth_json,
-            Some("OpenAI OAuth 登录".to_string()),
-        );
+        let mut account = store.add_account(user_info.email, auth_json, notes);
 
         account.refresh_token = token_res.refresh_token.clone();
         if let Some(acc) = store.accounts.get_mut(&account.id) {
@@ -534,10 +606,316 @@ async fn finalize_oauth_login(
         }
 
         store.save()?;
-        account
+        let should_push = account::pushes_to_server(&store.settings.remote_mode);
+        (account, should_push)
     };
-    crate::tray::update_tray_menu(&app);
+
+    if is_client_mode {
+        let (url, secret) = client_settings_snapshot(state).await?;
+        let to_push = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            store.accounts.get(&account.id).cloned()
+        };
+        if let Some(acc_snapshot) = to_push {
+            match remote_client::upsert_account(&url, &secret, &acc_snapshot).await {
+                Ok(outcome) => {
+                    if outcome.upserted == "merged" && outcome.id != account.id {
+                        let new_id = outcome.id.clone();
+                        if let Ok(mut store) = state.store.lock() {
+                            if let Some(mut a) = store.accounts.remove(&account.id) {
+                                a.id = new_id.clone();
+                                store.accounts.insert(new_id.clone(), a);
+                                if store.current.as_deref() == Some(account.id.as_str()) {
+                                    store.current = Some(new_id.clone());
+                                }
+                                let _ = store.save();
+                            }
+                        }
+                        let _ = app.emit("accounts-updated", ());
+                    }
+                    println!(
+                        "[Login] 已推送新账号到 Server：id={} action={} quota_refreshed={}",
+                        outcome.id, outcome.upserted, outcome.quota_refreshed
+                    );
+                }
+                Err(e) => eprintln!("[Login] 推送新账号到 Server 失败: {}", e),
+            }
+        }
+    }
+
+    crate::tray::update_tray_menu(app);
     Ok(account)
+}
+
+/// 强制把当前激活账号的 auth_json 覆盖到 ~/.codex/auth.json。
+/// 用于"switcher 当前账号 ↔ 磁盘 auth.json 身份不匹配"时的兜底：用户明确表态"我要保住 switcher 这一个"。
+/// 不动任何 codex 进程；前端按 auto_reload_ide 设置决定是否再调 reload_ide_windows。
+#[tauri::command]
+async fn force_overwrite_disk_with_current(
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let auth_json = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let current_id = store
+            .current
+            .clone()
+            .ok_or_else(|| "没有当前激活账号".to_string())?;
+        let account = store
+            .accounts
+            .get(&current_id)
+            .ok_or_else(|| format!("账号 {} 不存在", current_id))?;
+        account.auth_json.clone()
+    };
+    AccountStore::write_codex_auth(&auth_json)?;
+    Ok("已覆盖 ~/.codex/auth.json".to_string())
+}
+
+/// 完成 OAuth 登录并保存账号
+#[tauri::command]
+async fn finalize_oauth_login(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    code: String,
+) -> Result<Account, String> {
+    let token_res = oauth_server::complete_oauth_login(code).await?;
+    save_token_as_account(&state, &app, token_res, Some("OpenAI OAuth 登录".to_string())).await
+}
+
+// ============================================================================
+// 邮箱 OTP 批量自动授权
+// ============================================================================
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OtpBatchProgress {
+    index: usize,
+    total: usize,
+    email: String,
+    /// "pending" | "running" | "ok" | "fail"
+    status: &'static str,
+    /// provider tag (前端进度行徽章用)
+    provider: String,
+    /// 当 status="running" 时阶段文字
+    stage: Option<String>,
+    /// 成功时账号 id
+    account_id: Option<String>,
+    /// 失败 message
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OtpBatchResult {
+    success: Vec<String>,
+    failed: Vec<(String, String)>,
+}
+
+/// 前端传进来的一条 OTP 任务。
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OtpEntry {
+    email: String,
+    /// "usmail" | "sorryios"，为空按 "usmail" 处理
+    #[serde(default)]
+    provider: Option<String>,
+    /// sorryios 必须提供（32 位 token）
+    #[serde(default)]
+    token: Option<String>,
+}
+
+fn build_mailbox(entry: &OtpEntry) -> Result<Option<mailbox::MailboxProvider>, String> {
+    let provider = entry
+        .provider
+        .as_deref()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match provider.as_str() {
+        "" | "usmail" => Ok(None), // None = run_login 默认 usmail
+        "sorryios" => {
+            let token = entry
+                .token
+                .as_deref()
+                .ok_or_else(|| "sorryios provider 缺少 token".to_string())?
+                .trim()
+                .to_string();
+            if token.is_empty() {
+                return Err("sorryios provider token 为空".into());
+            }
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(|e| format!("构建 sorryios HTTP client 失败: {e}"))?;
+            Ok(Some(mailbox::MailboxProvider::Sorryios(
+                mailbox::SorryiosNet::new(client, token).since_now(),
+            )))
+        }
+        "nissanserena" => {
+            // 需要 cookie store 维持 session
+            let client = reqwest::Client::builder()
+                .cookie_store(true)
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+                .map_err(|e| format!("构建 nissanserena HTTP client 失败: {e}"))?;
+            Ok(Some(mailbox::MailboxProvider::NissanSerena(
+                mailbox::NissanSerena::new(client).since_now(),
+            )))
+        }
+        other => Err(format!("未知的 mailbox provider: {other}")),
+    }
+}
+
+/// 批量邮箱 OTP 自动授权。串行跑，每条都通过 save_token_as_account 落账号。
+/// 进度通过事件 "otp-batch-progress" 实时推到前端。
+#[tauri::command]
+async fn start_otp_login_batch(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    entries: Vec<OtpEntry>,
+    timeout_secs: Option<u64>,
+) -> Result<OtpBatchResult, String> {
+    use tauri::Emitter;
+    let timeout = timeout_secs.unwrap_or(180);
+    let total = entries.len();
+    let mut success = Vec::new();
+    let mut failed = Vec::new();
+
+    let provider_tag = |e: &OtpEntry| -> String {
+        e.provider
+            .as_deref()
+            .map(|s| s.to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "usmail".to_string())
+    };
+
+    // 先把全部以 pending 状态推一次，前端立刻看到列表
+    for (i, entry) in entries.iter().enumerate() {
+        let _ = app.emit(
+            "otp-batch-progress",
+            OtpBatchProgress {
+                index: i,
+                total,
+                email: entry.email.clone(),
+                status: "pending",
+                provider: provider_tag(entry),
+                stage: None,
+                account_id: None,
+                error: None,
+            },
+        );
+    }
+
+    for (i, entry) in entries.iter().enumerate() {
+        let email = entry.email.clone();
+        let tag = provider_tag(entry);
+        let _ = app.emit(
+            "otp-batch-progress",
+            OtpBatchProgress {
+                index: i,
+                total,
+                email: email.clone(),
+                status: "running",
+                provider: tag.clone(),
+                stage: Some("starting".into()),
+                account_id: None,
+                error: None,
+            },
+        );
+
+        let mailbox = match build_mailbox(entry) {
+            Ok(mb) => mb,
+            Err(e) => {
+                failed.push((email.clone(), e.clone()));
+                let _ = app.emit(
+                    "otp-batch-progress",
+                    OtpBatchProgress {
+                        index: i,
+                        total,
+                        email,
+                        status: "fail",
+                        provider: tag,
+                        stage: Some("provider".into()),
+                        account_id: None,
+                        error: Some(e),
+                    },
+                );
+                continue;
+            }
+        };
+
+        let result = otp_login::run_login(
+            otp_login::LoginInput {
+                email: email.clone(),
+                otp_timeout_secs: timeout,
+            },
+            mailbox,
+        )
+        .await;
+
+        match result {
+            Ok(out) => {
+                match save_token_as_account(
+                    &state,
+                    &app,
+                    out.token,
+                    Some("邮箱 OTP 自动授权".to_string()),
+                )
+                .await
+                {
+                    Ok(acc) => {
+                        success.push(email.clone());
+                        let _ = app.emit(
+                            "otp-batch-progress",
+                            OtpBatchProgress {
+                                index: i,
+                                total,
+                                email: email.clone(),
+                                status: "ok",
+                                provider: tag.clone(),
+                                stage: None,
+                                account_id: Some(acc.id),
+                                error: None,
+                            },
+                        );
+                        let _ = app.emit("accounts-updated", ());
+                    }
+                    Err(e) => {
+                        failed.push((email.clone(), e.clone()));
+                        let _ = app.emit(
+                            "otp-batch-progress",
+                            OtpBatchProgress {
+                                index: i,
+                                total,
+                                email: email.clone(),
+                                status: "fail",
+                                provider: tag.clone(),
+                                stage: Some("save".into()),
+                                account_id: None,
+                                error: Some(e),
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                failed.push((email.clone(), e.clone()));
+                let _ = app.emit(
+                    "otp-batch-progress",
+                    OtpBatchProgress {
+                        index: i,
+                        total,
+                        email: email.clone(),
+                        status: "fail",
+                        provider: tag.clone(),
+                        stage: Some("login".into()),
+                        account_id: None,
+                        error: Some(e),
+                    },
+                );
+            }
+        }
+    }
+
+    Ok(OtpBatchResult { success, failed })
 }
 
 // 补充 AppState 的辅助方法以方便在 finalize_oauth_login 中获取 AppHandle 是不行的，
@@ -684,8 +1062,20 @@ async fn switch_account(
         }
     }
 
-    // 3. 执行切换 (写入 auth.json)
-    println!("[Switch] 执行切换...");
+    // 3. 执行切换：根据 switch_mode + 代理运行状态决定热/冷切
+    let proxy_running = state
+        .proxy_handle
+        .lock()
+        .map(|h| h.is_some())
+        .unwrap_or(false);
+    let hot = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        account::should_hot_switch(&store.settings, proxy_running)
+    };
+    println!(
+        "[Switch] 执行切换...（模式={}）",
+        if hot { "热切" } else { "冷切" }
+    );
     if !state
         .refresh_locks
         .acquire(&target_id, tokio::time::Duration::from_secs(5))
@@ -695,7 +1085,7 @@ async fn switch_account(
     }
     let switch_result: Result<(), String> = {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        match store.switch_to(&target_id) {
+        match store.switch_to(&target_id, hot) {
             Ok(()) => store.save(),
             Err(e) => Err(e),
         }
@@ -739,6 +1129,172 @@ async fn switch_account(
 
     // 联动刷新托盘菜单
     crate::tray::update_tray_menu(&app);
+
+    // solo 模式：把新的 current 推给 Server（仅归档，失败不回滚）
+    push_solo_current_if_needed(state, &target_id).await;
+    Ok(())
+}
+
+/// 手动一键同号：拉 Server 的 current 并在本地热切到它。
+/// 无视 solo_auto_sync_current 开关，给用户"在关了自动同步后还能手工对齐"的能力。
+#[tauri::command]
+async fn solo_sync_current(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    let (mode, primary, fallback, secret) = {
+        let s = state.store.lock().map_err(|e| e.to_string())?;
+        (
+            s.settings.remote_mode.clone(),
+            s.settings.remote_server_url.clone(),
+            s.settings.remote_server_url_fallback.clone(),
+            s.settings.remote_shared_secret.clone(),
+        )
+    };
+    if mode != "solo" {
+        return Err("仅 solo 模式支持同号操作".to_string());
+    }
+    if secret.is_empty() {
+        return Err("未配置共享密钥".to_string());
+    }
+    let base = remote_client::resolve_base_url(&primary, &fallback).await?;
+    let before = { state.store.lock().ok().and_then(|s| s.current.clone()) };
+    solo_try_align_current(&state.store, &app, &base, &secret).await?;
+    let after = { state.store.lock().ok().and_then(|s| s.current.clone()) };
+    if before == after {
+        Ok(None) // 已经是 Server 的 current
+    } else {
+        Ok(after)
+    }
+}
+
+/// solo 模式下把当前 current 同步推给 Server。fire-and-forget，不阻塞调用方。
+/// Server 不可达时只记一条日志——下一次切号重试（暂不实现 pending 队列，先看实测）。
+async fn push_solo_current_if_needed(state: tauri::State<'_, AppState>, new_id: &str) {
+    let (mode, primary, fallback, secret) = {
+        match state.store.lock() {
+            Ok(s) => (
+                s.settings.remote_mode.clone(),
+                s.settings.remote_server_url.clone(),
+                s.settings.remote_server_url_fallback.clone(),
+                s.settings.remote_shared_secret.clone(),
+            ),
+            Err(_) => return,
+        }
+    };
+    if mode != "solo" || secret.is_empty() {
+        return;
+    }
+    match remote_client::resolve_base_url(&primary, &fallback).await {
+        Ok(base) => {
+            if let Err(e) = remote_client::push_solo_switch(&base, &secret, new_id).await {
+                eprintln!("[Solo] push /solo/current 失败（已本地生效）: {}", e);
+            }
+        }
+        Err(e) => eprintln!("[Solo] Server 不可达，切号未同步: {}", e),
+    }
+}
+
+/// solo 模式心跳循环：固定间隔向 Server 发心跳，让 Server 知道"本机正在接管保活"。
+/// 只要心跳还在滴答，Server 的 quota_refresh 循环就会让位，避免并发 refresh 撞 rotate。
+/// 若 solo_auto_sync_current 打开，心跳后顺带把本机 current 对齐到 Server 的 current。
+pub fn start_solo_heartbeat(
+    store: std::sync::Arc<std::sync::Mutex<AccountStore>>,
+    app_handle: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let (mode, primary, fallback, secret, auto_sync) = {
+                let s = store.lock().unwrap();
+                (
+                    s.settings.remote_mode.clone(),
+                    s.settings.remote_server_url.clone(),
+                    s.settings.remote_server_url_fallback.clone(),
+                    s.settings.remote_shared_secret.clone(),
+                    s.settings.solo_auto_sync_current,
+                )
+            };
+            if mode != "solo" {
+                println!("[Solo] 模式已非 solo（={}），心跳退出", mode);
+                return;
+            }
+            if !secret.is_empty() {
+                match remote_client::resolve_base_url(&primary, &fallback).await {
+                    Ok(base) => {
+                        if let Err(e) = remote_client::send_solo_heartbeat(
+                            &base,
+                            &secret,
+                            account::SOLO_HEARTBEAT_TTL_SECS,
+                        )
+                        .await
+                        {
+                            eprintln!("[Solo] 心跳失败: {}", e);
+                        } else if auto_sync {
+                            if let Err(e) =
+                                solo_try_align_current(&store, &app_handle, &base, &secret).await
+                            {
+                                eprintln!("[Solo] 自动同号本轮跳过: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("[Solo] Server 不可达，本轮跳过: {}", e),
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(
+                account::SOLO_HEARTBEAT_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    })
+}
+
+/// 拉 Server 的 /current，若与本机不一致则本地切号（不回推，避免环）。
+/// 代理未开时退化为冷切写 auth.json。
+async fn solo_try_align_current(
+    store: &std::sync::Arc<std::sync::Mutex<AccountStore>>,
+    app: &tauri::AppHandle,
+    base: &str,
+    secret: &str,
+) -> Result<(), String> {
+    let cur = remote_client::get_current(base, secret).await?;
+    let Some(mini_cur) = cur.current else {
+        return Ok(()); // Server 没 current，不动本地
+    };
+    let (local_cur, mode, proxy_enabled, exists_locally) = {
+        let s = store.lock().map_err(|e| e.to_string())?;
+        (
+            s.current.clone(),
+            s.settings.remote_mode.clone(),
+            s.settings.proxy_enabled,
+            s.accounts.contains_key(&mini_cur),
+        )
+    };
+    if mode != "solo" {
+        return Ok(());
+    }
+    if local_cur.as_deref() == Some(mini_cur.as_str()) {
+        return Ok(());
+    }
+    if !exists_locally {
+        return Err(format!(
+            "Server current={} 在本机不存在（可能还没 push 过账号）",
+            mini_cur
+        ));
+    }
+    let hot = {
+        let s = store.lock().map_err(|e| e.to_string())?;
+        account::should_hot_switch(&s.settings, proxy_enabled)
+    };
+    {
+        let mut s = store.lock().map_err(|e| e.to_string())?;
+        s.switch_to(&mini_cur, hot)?;
+        s.save()?;
+    }
+    crate::proxy::invalidate_remote_token_cache();
+    let _ = app.emit("proxy-account-switched", cur.name.unwrap_or_default());
+    let _ = app.emit("accounts-updated", ());
+    crate::tray::update_tray_menu(app);
+    println!("[Solo] 自动同号 → {}", mini_cur);
     Ok(())
 }
 
@@ -754,17 +1310,167 @@ pub fn start_quota_refresh(
         println!("[QuotaRefresh] 定时额度刷新已启动");
 
         loop {
-            let (enabled, interval_minutes, batch_size) = {
+            let (enabled, interval_minutes, batch_size, remote_mode, primary, fallback, secret) = {
                 let s = store.lock().unwrap();
                 (
                     s.settings.quota_refresh_enabled,
                     s.settings.quota_refresh_interval.max(1),
                     s.settings.quota_refresh_batch.max(1),
+                    s.settings.remote_mode.clone(),
+                    s.settings.remote_server_url.clone(),
+                    s.settings.remote_server_url_fallback.clone(),
+                    s.settings.remote_shared_secret.clone(),
                 )
             };
 
+            // client 模式：强制从 Server 拉 /quotas，忽略 enabled 开关（开关对 client 无意义）
+            // server/off 模式：遵循 enabled 开关
+            if remote_mode == "client" {
+                if secret.is_empty() {
+                    println!("[QuotaRefresh] client 模式但未配置 secret，跳过本轮");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(
+                        u64::from(interval_minutes) * 60,
+                    ))
+                    .await;
+                    continue;
+                }
+                match crate::remote_client::resolve_base_url(&primary, &fallback).await {
+                    Ok(base) => {
+                        match crate::remote_client::fetch_all_quota(&base, &secret).await {
+                            Ok(entries) => {
+                                let remote_ids: std::collections::HashSet<String> =
+                                    entries.iter().map(|e| e.id.clone()).collect();
+                                let (updated, pruned) = {
+                                    let mut updated = 0usize;
+                                    let mut pruned = 0usize;
+                                    if let Ok(mut s) = store.lock() {
+                                        // 1) 同步 quota/封禁/失效状态
+                                        for e in &entries {
+                                            if let Some(acc) = s.accounts.get_mut(&e.id) {
+                                                if let Some(q) = e.cached_quota.clone() {
+                                                    acc.cached_quota = Some(q);
+                                                    updated += 1;
+                                                }
+                                                acc.is_banned = e.is_banned;
+                                                acc.is_token_invalid = e.is_token_invalid;
+                                                acc.is_logged_out = e.is_logged_out;
+                                            }
+                                        }
+                                        // 2) 删除 Server 上已不存在的账号（多端删号同步）
+                                        let local_ids: Vec<String> =
+                                            s.accounts.keys().cloned().collect();
+                                        for id in local_ids {
+                                            if !remote_ids.contains(&id) {
+                                                s.accounts.remove(&id);
+                                                pruned += 1;
+                                                if s.current.as_deref() == Some(id.as_str()) {
+                                                    s.current = None;
+                                                }
+                                            }
+                                        }
+                                        let _ = s.save();
+                                    }
+                                    (updated, pruned)
+                                };
+                                // 3) 同步 Server 的 current 到本机（UI 统一 + 本机 Codex CLI 用同一个号）
+                                //    - 拉 Server 最新 token
+                                //    - 写本机 store（accounts.json） + 官方 ~/.codex/auth.json
+                                //    - 更新本机 current 指针
+                                //    规则：若 Server 正常，本机始终跟随 Server 的 current，
+                                //    避免本机 Codex CLI 自己 refresh 同一账号的 refresh_token 造成双端分叉。
+                                if let Ok(cur) =
+                                    crate::remote_client::get_current(&base, &secret).await
+                                {
+                                    if let Some(cid) = cur.current.clone() {
+                                        let exists_locally = {
+                                            if let Ok(s) = store.lock() {
+                                                s.accounts.contains_key(&cid)
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if exists_locally {
+                                            match crate::remote_client::fetch_token(
+                                                &base, &secret, &cid,
+                                            )
+                                            .await
+                                            {
+                                                Ok(t) => {
+                                                    if let Ok(mut s) = store.lock() {
+                                                        s.sync_account_from_auth_json(
+                                                            &cid,
+                                                            t.auth_json.clone(),
+                                                        );
+                                                        let prev_current = s.current.clone();
+                                                        s.current = Some(cid.clone());
+                                                        let _ = s.save();
+                                                        if prev_current.as_deref()
+                                                            != Some(cid.as_str())
+                                                        {
+                                                            println!(
+                                                                "[QuotaRefresh] client 对齐 current → {}",
+                                                                cur.name.clone().unwrap_or_default()
+                                                            );
+                                                        }
+                                                    }
+                                                    if let Err(e) =
+                                                        account::AccountStore::write_codex_auth(
+                                                            &t.auth_json,
+                                                        )
+                                                    {
+                                                        eprintln!(
+                                                            "[QuotaRefresh] 写 ~/.codex/auth.json 失败: {}",
+                                                            e
+                                                        );
+                                                    } else {
+                                                        println!(
+                                                            "[QuotaRefresh] client 已写 ~/.codex/auth.json（{}）",
+                                                            cur.name.unwrap_or_default()
+                                                        );
+                                                    }
+                                                    // 切号后清掉 proxy 端的远端 token 缓存
+                                                    crate::proxy::invalidate_remote_token_cache();
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "[QuotaRefresh] 拉 Server current token 失败: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                println!(
+                                    "[QuotaRefresh] client 从 Server 同步 {} 个额度，删除本地残留 {} 个",
+                                    updated, pruned
+                                );
+                                let _ = app_handle.emit("accounts-updated", ());
+                            }
+                            Err(e) => println!("[QuotaRefresh] client 拉取 /quotas 失败: {}", e),
+                        }
+                    }
+                    Err(e) => println!("[QuotaRefresh] client Server 不可达: {}", e),
+                }
+                let sync_minutes = u64::from(interval_minutes.max(5)); // client 模式最少 5 分钟
+                tokio::time::sleep(tokio::time::Duration::from_secs(sync_minutes * 60)).await;
+                continue;
+            }
+
+            // 非 client 模式才尊重 enabled 开关
             if !enabled {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                continue;
+            }
+
+            // Server（server 模式）若检测到有活跃 solo client，让位：跳过本轮保活，避免
+            // 双端并发 refresh 同一账号的 refresh_token 造成 rotate 冲突。
+            if remote_mode == "server" && crate::remote_server::solo_is_active() {
+                println!("[QuotaRefresh] 检测到活跃 solo client，跳过本轮（让位）");
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    u64::from(interval_minutes) * 60,
+                ))
+                .await;
                 continue;
             }
 
@@ -1485,6 +2191,14 @@ fn get_token_history(days: u32) -> Result<Vec<token_tracker::TokenHistoryEntry>,
     Ok(token_tracker::TokenTracker::get_history(days))
 }
 
+/// 当前 SessionAffinity 表里所有活跃绑定（session_key → account 映射）
+#[tauri::command]
+fn get_session_bindings(
+    state: State<AppState>,
+) -> Result<Vec<session_affinity::SessionBindingSnapshot>, String> {
+    Ok(state.session_affinity.snapshot())
+}
+
 // ── Skills 管理命令 ──
 
 #[tauri::command]
@@ -1976,15 +2690,15 @@ fn client_settings_snapshot_raw(
     state: &State<AppState>,
 ) -> Result<(String, String, String), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    if store.settings.remote_mini_url.is_empty() && store.settings.remote_mini_url_fallback.is_empty() {
-        return Err("未配置 Mini 地址".to_string());
+    if store.settings.remote_server_url.is_empty() && store.settings.remote_server_url_fallback.is_empty() {
+        return Err("未配置 Server 地址".to_string());
     }
     if store.settings.remote_shared_secret.is_empty() {
         return Err("未配置共享密钥".to_string());
     }
     Ok((
-        store.settings.remote_mini_url.clone(),
-        store.settings.remote_mini_url_fallback.clone(),
+        store.settings.remote_server_url.clone(),
+        store.settings.remote_server_url_fallback.clone(),
         store.settings.remote_shared_secret.clone(),
     ))
 }
@@ -2024,7 +2738,11 @@ async fn remote_probe(
 }
 
 #[tauri::command]
-async fn remote_push_account(state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn remote_push_account(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<remote_client::UpsertOutcome, String> {
     let (url, secret) = client_settings_snapshot(&state).await?;
     let account = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
@@ -2035,7 +2753,23 @@ async fn remote_push_account(state: State<'_, AppState>, id: String) -> Result<(
             .cloned()
             .ok_or_else(|| format!("本地未找到账号 {}", id))?
     };
-    remote_client::upsert_account(&url, &secret, &account).await
+    let outcome = remote_client::upsert_account(&url, &secret, &account).await?;
+    // 若 Server 按邮箱+身份合并到了旧 id，本机也把这个账号的 id 改过去，避免下次推又走 merged 分支
+    if outcome.upserted == "merged" && outcome.id != id {
+        let new_id = outcome.id.clone();
+        if let Ok(mut store) = state.store.lock() {
+            if let Some(mut acc) = store.accounts.remove(&id) {
+                acc.id = new_id.clone();
+                store.accounts.insert(new_id.clone(), acc);
+                if store.current.as_deref() == Some(id.as_str()) {
+                    store.current = Some(new_id);
+                }
+                let _ = store.save();
+            }
+        }
+        let _ = app.emit("accounts-updated", ());
+    }
+    Ok(outcome)
 }
 
 #[tauri::command]
@@ -2053,6 +2787,8 @@ async fn remote_push_all(state: State<'_, AppState>) -> Result<usize, String> {
     Ok(ok)
 }
 
+
+
 #[tauri::command]
 async fn remote_pull_all(state: State<'_, AppState>) -> Result<usize, String> {
     let (url, secret) = client_settings_snapshot(&state).await?;
@@ -2065,6 +2801,86 @@ async fn remote_pull_all(state: State<'_, AppState>) -> Result<usize, String> {
     }
     store.save()?;
     Ok(merged)
+}
+
+#[derive(serde::Serialize)]
+struct RemoteTokenSyncReport {
+    pulled: usize,
+    refreshed: usize,
+    current: Option<String>,
+    current_name: Option<String>,
+    wrote_auth_json: bool,
+    errors: Vec<(String, String)>,
+}
+
+/// 从 Server 逐个拉取每个账号的最新 token（/accounts/:id/token），合并到本机 store。
+/// 若 Server 的 current 在本机存在，同时写 ~/.codex/auth.json 并更新本机 current。
+#[tauri::command]
+async fn remote_pull_all_tokens(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<RemoteTokenSyncReport, String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    // 先整体 list 一遍，确保本机有所有账号元数据
+    let remote_accounts = remote_client::list_accounts(&url, &secret).await?;
+    let pulled = remote_accounts.len();
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        for ra in remote_accounts.iter() {
+            store.accounts.insert(ra.id.clone(), ra.clone());
+        }
+        store.save()?;
+    }
+    // 逐个拉 token（/accounts/:id/token 返回 Server 上最新的 auth_json）
+    let mut refreshed = 0usize;
+    let mut errors: Vec<(String, String)> = Vec::new();
+    let ids: Vec<String> = remote_accounts.iter().map(|a| a.id.clone()).collect();
+    for id in ids.iter() {
+        match remote_client::fetch_token(&url, &secret, id).await {
+            Ok(t) => {
+                if let Ok(mut store) = state.store.lock() {
+                    store.sync_account_from_auth_json(id, t.auth_json);
+                    let _ = store.save();
+                }
+                refreshed += 1;
+            }
+            Err(e) => errors.push((id.clone(), e)),
+        }
+    }
+    // 处理 Server 的 current：若本机有该账号，则写 auth.json + 更新 current
+    let cur = remote_client::get_current(&url, &secret).await.ok();
+    let mut wrote_auth_json = false;
+    let (cur_id, cur_name) = if let Some(c) = cur.as_ref() {
+        (c.current.clone(), c.name.clone())
+    } else {
+        (None, None)
+    };
+    if let Some(cid) = cur_id.as_ref() {
+        let auth_opt = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            store.accounts.get(cid).map(|a| a.auth_json.clone())
+        };
+        if let Some(auth) = auth_opt {
+            if let Err(e) = account::AccountStore::write_codex_auth(&auth) {
+                errors.push((cid.clone(), format!("写 auth.json 失败: {}", e)));
+            } else {
+                wrote_auth_json = true;
+                if let Ok(mut store) = state.store.lock() {
+                    store.current = Some(cid.clone());
+                    let _ = store.save();
+                }
+            }
+        }
+    }
+    let _ = app.emit("accounts-updated", ());
+    Ok(RemoteTokenSyncReport {
+        pulled,
+        refreshed,
+        current: cur_id,
+        current_name: cur_name,
+        wrote_auth_json,
+        errors,
+    })
 }
 
 #[tauri::command]
@@ -2085,9 +2901,85 @@ async fn remote_fetch_token(
     remote_client::fetch_token(&url, &secret, &id).await
 }
 
+/// client 模式下由 Server 完成一次 token 刷新 + usage 拉取，并把结果同步到本机 cached_quota。
+#[tauri::command]
+async fn remote_refresh_account_quota(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<UsageDisplay, String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    let usage = remote_client::refresh_account_quota(&url, &secret, &id).await?;
+    if let Ok(mut store) = state.store.lock() {
+        if let Some(acc) = store.accounts.get_mut(&id) {
+            acc.cached_quota = Some(usage_to_cached(&usage));
+            acc.is_banned = false;
+            acc.is_token_invalid = false;
+            acc.is_logged_out = false;
+            let _ = store.save();
+        }
+    }
+    let _ = app.emit("accounts-updated", ());
+    Ok(usage)
+}
+
+#[derive(serde::Serialize)]
+struct SkillSyncReport {
+    pushed: Vec<String>,
+    skipped: Vec<String>,
+    errors: Vec<(String, String)>,
+}
+
+/// 本机 → Server 单向同步所有 skills（按黑名单跳过）
+#[tauri::command]
+async fn remote_sync_skills(state: State<'_, AppState>) -> Result<SkillSyncReport, String> {
+    let (url, secret) = client_settings_snapshot(&state).await?;
+    let blacklist: std::collections::HashSet<String> = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        store
+            .settings
+            .skills_sync_blacklist
+            .iter()
+            .cloned()
+            .collect()
+    };
+    let names = skills::list_local_skill_dirs();
+    let mut pushed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut errors: Vec<(String, String)> = Vec::new();
+    for name in names {
+        if blacklist.contains(&name) {
+            skipped.push(name);
+            continue;
+        }
+        let zip_result = {
+            let name = name.clone();
+            tokio::task::spawn_blocking(move || skills::zip_skill_dir(&name))
+                .await
+                .map_err(|e| format!("zip task 崩溃: {}", e))?
+        };
+        let bytes = match zip_result {
+            Ok(b) => b,
+            Err(e) => {
+                errors.push((name, e));
+                continue;
+            }
+        };
+        match remote_client::upload_skill(&url, &secret, &name, bytes).await {
+            Ok(_) => pushed.push(name),
+            Err(e) => errors.push((name, e)),
+        }
+    }
+    Ok(SkillSyncReport {
+        pushed,
+        skipped,
+        errors,
+    })
+}
+
 /// 按当前 settings 启动/重启 server 端 HTTP API（便于 UI 切换模式后不用重启 App）
 #[tauri::command]
-fn remote_restart_server(state: State<AppState>) -> Result<String, String> {
+fn remote_restart_server(state: State<AppState>, app: tauri::AppHandle) -> Result<String, String> {
     let (mode, port, bind, secret) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         (
@@ -2119,6 +3011,7 @@ fn remote_restart_server(state: State<AppState>) -> Result<String, String> {
         port,
         secret,
         env!("CARGO_PKG_VERSION").to_string(),
+        app,
     );
     let mut slot = state
         .remote_server_handle
@@ -2180,6 +3073,7 @@ pub fn run() {
                     state.token_tracker.clone(),
                     state.ws_disconnect.clone(),
                     state.switch_logger.clone(),
+                    state.session_affinity.clone(),
                 );
                 let mut proxy_handle = state.proxy_handle.lock().unwrap();
                 *proxy_handle = Some(handle);
@@ -2216,6 +3110,7 @@ pub fn run() {
                         remote_port,
                         remote_secret,
                         env!("CARGO_PKG_VERSION").to_string(),
+                        app.handle().clone(),
                     );
                     let mut slot = state.remote_server_handle.lock().unwrap();
                     *slot = Some(handle);
@@ -2224,16 +3119,26 @@ pub fn run() {
                 println!("[RemoteServer] Remote Mode 未启用（mode={}）", remote_mode);
             }
 
-            // 启动定时额度刷新
-            let quota_refresh_enabled = state
+            // 启动定时额度刷新（client 模式无条件启动，它承担 Server 状态同步）
+            let should_run_quota_loop = state
                 .store
                 .lock()
-                .map(|s| s.settings.quota_refresh_enabled)
+                .map(|s| s.settings.quota_refresh_enabled || s.settings.remote_mode == "client")
                 .unwrap_or(false);
-            if quota_refresh_enabled {
+            if should_run_quota_loop {
                 let handle = start_quota_refresh(state.store.clone(), app.handle().clone());
                 let mut qr = state.quota_refresh_handle.lock().unwrap();
                 *qr = Some(handle);
+                println!("[QuotaRefresh] 启动中（setup 阶段）");
+            }
+
+            // solo 模式心跳循环（向 Server 声明"本机接管保活"）
+            if remote_mode == "solo" {
+                let handle =
+                    start_solo_heartbeat(state.store.clone(), app.handle().clone());
+                let mut slot = state.solo_heartbeat_handle.lock().unwrap();
+                *slot = Some(handle);
+                println!("[Solo] 心跳循环启动");
             }
 
             // 初始化 Skills SSOT + 自动导入
@@ -2279,7 +3184,11 @@ pub fn run() {
             check_codex_login,
             get_quota_by_id,
             oauth_server::start_oauth_login,
+            oauth_server::submit_oauth_callback,
+            solo_sync_current,
             finalize_oauth_login,
+            force_overwrite_disk_with_current,
+            start_otp_login_batch,
             reload_ide_windows,
             get_settings,
             update_settings,
@@ -2292,6 +3201,7 @@ pub fn run() {
             set_codex_fast_mode,
             get_codex_fast_mode,
             get_token_history,
+            get_session_bindings,
             get_switch_history,
             get_switch_stats,
             get_installed_skills,
@@ -2318,8 +3228,11 @@ pub fn run() {
             remote_push_account,
             remote_push_all,
             remote_pull_all,
+            remote_pull_all_tokens,
             remote_delete_account_cmd,
             remote_fetch_token,
+            remote_refresh_account_quota,
+            remote_sync_skills,
             remote_restart_server,
         ])
         .run(tauri::generate_context!())

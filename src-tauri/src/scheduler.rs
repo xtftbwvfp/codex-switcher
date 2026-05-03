@@ -65,9 +65,9 @@ pub fn start(
                 continue;
             }
 
-            // client 模式下：保活交给 Mini，本机只做 auth.json 反向同步，不独占刷新
+            // client 模式下：保活交给 Server，本机只做 auth.json 反向同步，不独占刷新
             if remote_mode == "client" {
-                println!("[Scheduler] client 模式：跳过本机保活，Mini 负责刷新");
+                println!("[Scheduler] client 模式：跳过本机保活，Server 负责刷新");
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 continue;
             }

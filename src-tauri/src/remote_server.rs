@@ -1,10 +1,11 @@
-//! Remote Mode — Mini 侧 HTTP API 服务器
+//! Remote Mode — Server 侧 HTTP API 服务器
 //!
 //! 提供账号 CRUD 和 token 拉取接口，供本机 client 模式调用。
 //! 认证：X-Auth-Token 头必须匹配 settings.remote_shared_secret。
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -15,16 +16,30 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tauri::Emitter;
 use tokio::net::TcpListener;
 
 use crate::account::{Account, AccountStore};
 
 type ResponseBody = Full<Bytes>;
 
+/// solo 模式的活跃心跳时间戳（unix seconds）。大于 now 时 Server 侧跳过本地保活，避免
+/// 和 solo 客户端双端 refresh 撞 rotate。初始 0 = 无活跃 solo。
+fn active_solo_until() -> &'static AtomicI64 {
+    static V: OnceLock<AtomicI64> = OnceLock::new();
+    V.get_or_init(|| AtomicI64::new(0))
+}
+
+/// Server 侧定时任务使用：是否有活跃 solo client？有则应跳过本地保活 / quota 刷新。
+pub fn solo_is_active() -> bool {
+    active_solo_until().load(Ordering::Relaxed) > chrono::Utc::now().timestamp()
+}
+
 struct ApiState {
     store: Arc<Mutex<AccountStore>>,
     secret: String,
     version: String,
+    app_handle: tauri::AppHandle,
 }
 
 pub fn spawn_remote_server(
@@ -33,6 +48,7 @@ pub fn spawn_remote_server(
     port: u16,
     secret: String,
     version: String,
+    app_handle: tauri::AppHandle,
 ) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         let ip: std::net::IpAddr = match bind.parse() {
@@ -50,12 +66,13 @@ pub fn spawn_remote_server(
                 return;
             }
         };
-        println!("[RemoteServer] Mini HTTP API 已启动: http://{}", addr);
+        println!("[RemoteServer] Server HTTP API 已启动: http://{}", addr);
 
         let state = Arc::new(ApiState {
             store,
             secret,
             version,
+            app_handle,
         });
 
         loop {
@@ -105,6 +122,35 @@ async fn route(
     }
 
     // 路由
+    if path == "/quotas" && method == Method::GET {
+        return handle_list_quota(&state);
+    }
+
+    if path == "/skills" && method == Method::GET {
+        return handle_list_skills();
+    }
+
+    if path == "/skills/upload" && method == Method::POST {
+        let query = req.uri().query().unwrap_or("").to_string();
+        return handle_upload_skill(req, &query).await;
+    }
+
+    if path == "/current" && method == Method::GET {
+        return handle_get_current(&state);
+    }
+
+    if path == "/switch" && method == Method::POST {
+        return handle_switch(&state, req).await;
+    }
+
+    if path == "/solo/heartbeat" && method == Method::POST {
+        return handle_solo_heartbeat(req).await;
+    }
+
+    if path == "/solo/current" && method == Method::POST {
+        return handle_solo_current(&state, req).await;
+    }
+
     if path == "/accounts" {
         match method {
             Method::GET => return handle_list(&state),
@@ -121,6 +167,9 @@ async fn route(
         if !id.is_empty() {
             match (method.clone(), sub) {
                 (Method::GET, Some("token")) => return handle_get_token(&state, id),
+                (Method::POST, Some("refresh")) => {
+                    return handle_refresh_account(&state, id).await;
+                }
                 (Method::GET, None) => return handle_get_account(&state, id),
                 (Method::DELETE, None) => return handle_delete(&state, id),
                 _ => {}
@@ -166,6 +215,28 @@ fn handle_list(state: &ApiState) -> Response<ResponseBody> {
     json_resp(StatusCode::OK, json!({ "accounts": accounts }))
 }
 
+fn handle_list_quota(state: &ApiState) -> Response<ResponseBody> {
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+    };
+    let quotas: Vec<Value> = store
+        .accounts
+        .values()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "name": a.name,
+                "cached_quota": a.cached_quota,
+                "is_banned": a.is_banned,
+                "is_token_invalid": a.is_token_invalid,
+                "is_logged_out": a.is_logged_out,
+            })
+        })
+        .collect();
+    json_resp(StatusCode::OK, json!({ "quotas": quotas }))
+}
+
 fn handle_get_account(state: &ApiState, id: &str) -> Response<ResponseBody> {
     let store = match state.store.lock() {
         Ok(s) => s,
@@ -204,6 +275,8 @@ struct UpsertResult {
     ok: bool,
     id: String,
     upserted: &'static str,
+    quota_refreshed: bool,
+    quota_error: Option<String>,
 }
 
 async fn handle_upsert(state: &ApiState, req: Request<Incoming>) -> Response<ResponseBody> {
@@ -221,36 +294,187 @@ async fn handle_upsert(state: &ApiState, req: Request<Incoming>) -> Response<Res
         }
     };
 
-    let mut store = match state.store.lock() {
-        Ok(s) => s,
-        Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+    let incoming = payload.account;
+    let incoming_id = incoming.id.clone();
+    // 去重匹配规则：
+    //   1) 按 id 命中 → updated（常规更新）
+    //   2) 邮箱相同 + auth_identity_matches（tokens.account_id / openai user id 一致）→ merged
+    //      这样同邮箱的 team / plus / free 因 account_id 不同，会被识别为不同账号，不会误合
+    //   3) 其它 → created
+    let email_key = incoming.name.trim().to_lowercase();
+    let (final_id, action): (String, &'static str) = {
+        let mut store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+        };
+        let id_hit = store.accounts.contains_key(&incoming_id);
+        let identity_hit: Option<String> = if !id_hit && email_key.contains('@') {
+            store
+                .list_accounts()
+                .into_iter()
+                .find(|a| {
+                    a.name.trim().to_lowercase() == email_key
+                        && AccountStore::auth_identity_matches(&a.auth_json, &incoming.auth_json)
+                })
+                .map(|a| a.id.clone())
+        } else {
+            None
+        };
+        let (final_id, action) = match (id_hit, identity_hit) {
+            (true, _) => (incoming_id.clone(), "updated"),
+            (false, Some(existing_id)) => (existing_id, "merged"),
+            (false, None) => (incoming_id.clone(), "created"),
+        };
+        let mut to_write = incoming;
+        to_write.id = final_id.clone();
+        if action == "merged" {
+            if let Some(old) = store.accounts.get(&final_id) {
+                to_write.created_at = old.created_at.clone();
+                if to_write.notes.is_none() {
+                    to_write.notes = old.notes.clone();
+                }
+            }
+        }
+        if let Err(e) = upsert_account(&mut store, to_write) {
+            return err_resp(e);
+        }
+        if let Err(e) = store.save() {
+            return err_resp(format!("保存失败: {}", e));
+        }
+        (final_id, action)
+    };
+    let id = final_id;
+
+    // upsert 完成后：服务端主动刷新一次该账号的额度
+    let (access_token_opt, account_id, refresh_token) = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(_) => {
+                let body = UpsertResult {
+                    ok: true,
+                    id,
+                    upserted: action,
+                    quota_refreshed: false,
+                    quota_error: Some("锁获取失败".to_string()),
+                };
+                return match serde_json::to_vec(&body) {
+                    Ok(v) => resp_with_body(StatusCode::OK, v),
+                    Err(e) => err_resp(format!("序列化响应失败: {}", e)),
+                };
+            }
+        };
+        match store.accounts.get(&id) {
+            Some(a) => (
+                AccountStore::extract_access_token(&a.auth_json),
+                AccountStore::extract_account_id(&a.auth_json),
+                a.refresh_token
+                    .clone()
+                    .or_else(|| AccountStore::extract_refresh_token(&a.auth_json)),
+            ),
+            None => (None, None, None),
+        }
     };
 
-    let id = payload.account.id.clone();
-    let exists = store.list_accounts().iter().any(|a| a.id == id);
-    let action = if exists { "updated" } else { "created" };
+    let mut quota_refreshed = false;
+    let mut quota_error: Option<String> = None;
 
-    if exists {
-        // 用已有的 update_account（只覆盖可变字段），或直接替换整个账号
-        // 为了简单：用 import 的方式修改 accounts 向量
-        if let Err(e) = upsert_account(&mut store, payload.account) {
-            return err_resp(e);
+    let access_token = match access_token_opt {
+        Some(t) => Some(t),
+        None => {
+            if let Some(ref rt) = refresh_token {
+                match crate::oauth::refresh_access_token(rt).await {
+                    Ok(tok) => {
+                        if let Ok(mut s) = state.store.lock() {
+                            if let Some(acc) = s.accounts.get_mut(&id) {
+                                AccountStore::apply_refreshed_tokens(
+                                    acc,
+                                    tok.access_token.clone(),
+                                    tok.refresh_token.clone(),
+                                    tok.id_token,
+                                    tok.expires_in,
+                                );
+                                let _ = s.save();
+                            }
+                        }
+                        Some(tok.access_token)
+                    }
+                    Err(e) => {
+                        quota_error = Some(format!("刷新 token 失败: {}", e));
+                        None
+                    }
+                }
+            } else {
+                quota_error = Some("无 access_token 且无 refresh_token".to_string());
+                None
+            }
         }
-    } else {
-        // 直接 push
-        if let Err(e) = upsert_account(&mut store, payload.account) {
-            return err_resp(e);
+    };
+
+    if let Some(at) = access_token {
+        match crate::usage::UsageFetcher::fetch_usage_direct(
+            at,
+            account_id,
+            refresh_token,
+            true,
+        )
+        .await
+        {
+            Ok((usage, _)) => {
+                if let Ok(mut s) = state.store.lock() {
+                    if let Some(acc) = s.accounts.get_mut(&id) {
+                        acc.cached_quota = Some(crate::account::CachedQuota {
+                            five_hour_left: usage.five_hour_left as f64,
+                            five_hour_reset: usage.five_hour_reset.clone(),
+                            five_hour_reset_at: usage.five_hour_reset_at,
+                            five_hour_label: usage.five_hour_label.clone(),
+                            weekly_left: usage.weekly_left as f64,
+                            weekly_reset: usage.weekly_reset.clone(),
+                            weekly_reset_at: usage.weekly_reset_at,
+                            weekly_label: usage.weekly_label.clone(),
+                            plan_type: usage.plan_type.clone(),
+                            is_valid_for_cli: usage.is_valid_for_cli,
+                            updated_at: chrono::Utc::now(),
+                        });
+                        acc.is_banned = false;
+                        acc.is_token_invalid = false;
+                        acc.is_logged_out = false;
+                        let _ = s.save();
+                        quota_refreshed = true;
+                    }
+                }
+                let _ = state.app_handle.emit("accounts-updated", ());
+            }
+            Err(e) => {
+                if e.contains("ACCOUNT_BANNED") {
+                    if let Ok(mut s) = state.store.lock() {
+                        if let Some(a) = s.accounts.get_mut(&id) {
+                            a.is_banned = true;
+                            let _ = s.save();
+                        }
+                    }
+                } else if e.contains("TOKEN_INVALID") {
+                    if let Ok(mut s) = state.store.lock() {
+                        if let Some(a) = s.accounts.get_mut(&id) {
+                            a.is_token_invalid = true;
+                            let _ = s.save();
+                        }
+                    }
+                }
+                quota_error = Some(e);
+            }
         }
     }
 
-    if let Err(e) = store.save() {
-        return err_resp(format!("保存失败: {}", e));
-    }
+    // 不论 quota 刷新是否成功，upsert 本身已落盘；保证 Server UI 也能看到新账号/状态变更
+    let _ = state.app_handle.emit("accounts-updated", ());
+    crate::tray::update_tray_menu(&state.app_handle);
 
     let body = UpsertResult {
         ok: true,
         id,
         upserted: action,
+        quota_refreshed,
+        quota_error,
     };
     match serde_json::to_vec(&body) {
         Ok(v) => resp_with_body(StatusCode::OK, v),
@@ -265,17 +489,145 @@ fn upsert_account(store: &mut AccountStore, incoming: Account) -> Result<(), Str
 }
 
 fn handle_delete(state: &ApiState, id: &str) -> Response<ResponseBody> {
-    let mut store = match state.store.lock() {
-        Ok(s) => s,
-        Err(e) => return err_resp(format!("锁获取失败: {}", e)),
-    };
-    if let Err(e) = store.delete_account(id) {
-        return json_resp(StatusCode::BAD_REQUEST, json!({"error": e}));
+    {
+        let mut store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+        };
+        if let Err(e) = store.delete_account(id) {
+            return json_resp(StatusCode::BAD_REQUEST, json!({"error": e}));
+        }
+        if let Err(e) = store.save() {
+            return err_resp(format!("保存失败: {}", e));
+        }
     }
-    if let Err(e) = store.save() {
-        return err_resp(format!("保存失败: {}", e));
-    }
+    // 通知 UI 刷新（client 通过 remote API 触发的变更也需要让 Server 本机 UI 同步）
+    let _ = state.app_handle.emit("accounts-updated", ());
+    crate::tray::update_tray_menu(&state.app_handle);
     json_resp(StatusCode::OK, json!({"ok": true}))
+}
+
+/// 服务端对某个账号执行一次 access_token 刷新 + usage 拉取，
+/// 并回写 cached_quota。供 client 模式下本机刷新按钮使用（本机不持 token）。
+async fn handle_refresh_account(state: &ApiState, id: &str) -> Response<ResponseBody> {
+    let id = id.to_string();
+
+    let (access_token_opt, account_id, refresh_token) = {
+        let store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+        };
+        match store.accounts.get(&id) {
+            Some(a) => (
+                AccountStore::extract_access_token(&a.auth_json),
+                AccountStore::extract_account_id(&a.auth_json),
+                a.refresh_token
+                    .clone()
+                    .or_else(|| AccountStore::extract_refresh_token(&a.auth_json)),
+            ),
+            None => {
+                return json_resp(
+                    StatusCode::NOT_FOUND,
+                    json!({"error": "account not found"}),
+                );
+            }
+        }
+    };
+
+    let access_token = match access_token_opt {
+        Some(t) => t,
+        None => {
+            let Some(rt) = refresh_token.clone() else {
+                return json_resp(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "TOKEN_INVALID:无 access_token 且无 refresh_token"}),
+                );
+            };
+            match crate::oauth::refresh_access_token(&rt).await {
+                Ok(tok) => {
+                    if let Ok(mut s) = state.store.lock() {
+                        if let Some(acc) = s.accounts.get_mut(&id) {
+                            AccountStore::apply_refreshed_tokens(
+                                acc,
+                                tok.access_token.clone(),
+                                tok.refresh_token.clone(),
+                                tok.id_token,
+                                tok.expires_in,
+                            );
+                            let _ = s.save();
+                        }
+                    }
+                    tok.access_token
+                }
+                Err(e) => {
+                    return json_resp(
+                        StatusCode::BAD_REQUEST,
+                        json!({"error": format!("TOKEN_INVALID:刷新 token 失败: {}", e)}),
+                    );
+                }
+            }
+        }
+    };
+
+    match crate::usage::UsageFetcher::fetch_usage_direct(
+        access_token,
+        account_id,
+        refresh_token,
+        true,
+    )
+    .await
+    {
+        Ok((usage, _)) => {
+            if let Ok(mut s) = state.store.lock() {
+                if let Some(acc) = s.accounts.get_mut(&id) {
+                    acc.cached_quota = Some(crate::account::CachedQuota {
+                        five_hour_left: usage.five_hour_left as f64,
+                        five_hour_reset: usage.five_hour_reset.clone(),
+                        five_hour_reset_at: usage.five_hour_reset_at,
+                        five_hour_label: usage.five_hour_label.clone(),
+                        weekly_left: usage.weekly_left as f64,
+                        weekly_reset: usage.weekly_reset.clone(),
+                        weekly_reset_at: usage.weekly_reset_at,
+                        weekly_label: usage.weekly_label.clone(),
+                        plan_type: usage.plan_type.clone(),
+                        is_valid_for_cli: usage.is_valid_for_cli,
+                        updated_at: chrono::Utc::now(),
+                    });
+                    acc.is_banned = false;
+                    acc.is_token_invalid = false;
+                    acc.is_logged_out = false;
+                    let _ = s.save();
+                }
+            }
+            let _ = state.app_handle.emit("accounts-updated", ());
+            json_resp(StatusCode::OK, json!({"ok": true, "usage": usage}))
+        }
+        Err(e) => {
+            if e.contains("ACCOUNT_BANNED") {
+                if let Ok(mut s) = state.store.lock() {
+                    if let Some(a) = s.accounts.get_mut(&id) {
+                        a.is_banned = true;
+                        let _ = s.save();
+                    }
+                }
+            } else if e.contains("TOKEN_INVALID") {
+                if let Ok(mut s) = state.store.lock() {
+                    if let Some(a) = s.accounts.get_mut(&id) {
+                        a.is_token_invalid = true;
+                        let _ = s.save();
+                    }
+                }
+            } else if e.contains("ACCOUNT_LOGGED_OUT") {
+                if let Ok(mut s) = state.store.lock() {
+                    if let Some(a) = s.accounts.get_mut(&id) {
+                        a.is_logged_out = true;
+                        let _ = s.save();
+                    }
+                }
+            }
+            json_resp(StatusCode::BAD_REQUEST, json!({"error": e}))
+        }
+    }
 }
 
 fn json_resp(status: StatusCode, value: Value) -> Response<ResponseBody> {
@@ -290,6 +642,337 @@ fn json_resp(status: StatusCode, value: Value) -> Response<ResponseBody> {
 
 fn err_resp(msg: String) -> Response<ResponseBody> {
     json_resp(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": msg}))
+}
+
+fn handle_get_current(state: &ApiState) -> Response<ResponseBody> {
+    let store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+    };
+    let current = store.current.clone();
+    let (name, quota) = match current.as_ref().and_then(|id| store.accounts.get(id)) {
+        Some(a) => (Some(a.name.clone()), a.cached_quota.clone()),
+        None => (None, None),
+    };
+    json_resp(
+        StatusCode::OK,
+        json!({
+            "current": current,
+            "name": name,
+            "cached_quota": quota,
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct SwitchPayload {
+    from: Option<String>,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn handle_switch(state: &ApiState, req: Request<Incoming>) -> Response<ResponseBody> {
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => return err_resp(format!("读取 body 失败: {}", e)),
+    };
+    let payload: SwitchPayload = if body.is_empty() {
+        SwitchPayload {
+            from: None,
+            reason: String::new(),
+        }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                return json_resp(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": format!("JSON 解析失败: {}", e)}),
+                );
+            }
+        }
+    };
+
+    let mut store = match state.store.lock() {
+        Ok(s) => s,
+        Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+    };
+
+    let current_now = store.current.clone();
+    // CAS：调用方声明的 from 跟 Server 当前不一致 → 说明已经被别人切过了
+    if let Some(ref from) = payload.from {
+        if current_now.as_deref() != Some(from.as_str()) {
+            return json_resp(
+                StatusCode::OK,
+                json!({
+                    "switched": false,
+                    "stale": true,
+                    "current": current_now,
+                    "reason": "already_switched",
+                }),
+            );
+        }
+    }
+
+    // 把旧 current 的 5h 标记为耗尽（如果原因是 429/preemptive）
+    let reason_lower = payload.reason.to_lowercase();
+    let should_mark = reason_lower.contains("429")
+        || reason_lower.contains("http")
+        || reason_lower.contains("preemptive")
+        || reason_lower.contains("quota");
+    if should_mark {
+        if let Some(ref id) = current_now {
+            if let Some(acc) = store.accounts.get_mut(id) {
+                if let Some(ref mut q) = acc.cached_quota {
+                    q.five_hour_left = 0.0;
+                }
+            }
+        }
+    }
+
+    // 选下一个账号
+    let candidates = crate::score_candidate_accounts(&store);
+    let next_id = candidates.into_iter().find_map(|(id, _, _)| {
+        if current_now.as_deref() == Some(id.as_str()) {
+            None
+        } else {
+            Some(id)
+        }
+    });
+
+    let Some(new_id) = next_id else {
+        // 算最早 reset
+        let now = chrono::Utc::now().timestamp();
+        let mut earliest: Option<i64> = None;
+        for a in store.accounts.values() {
+            if let Some(q) = &a.cached_quota {
+                for r in [q.five_hour_reset_at, q.weekly_reset_at]
+                    .into_iter()
+                    .flatten()
+                {
+                    if now < r {
+                        earliest = Some(earliest.map_or(r, |e: i64| e.min(r)));
+                    }
+                }
+            }
+        }
+        return json_resp(
+            StatusCode::OK,
+            json!({
+                "switched": false,
+                "exhausted": true,
+                "current": current_now,
+                "earliest_reset_at": earliest,
+            }),
+        );
+    };
+
+    let from_name = current_now
+        .as_ref()
+        .and_then(|id| store.accounts.get(id))
+        .map(|a| a.name.clone());
+
+    // Server 侧按本机 switch_mode + proxy_enabled 决定热/冷。粗估：proxy_enabled 即视为 running。
+    let hot = crate::account::should_hot_switch(&store.settings, store.settings.proxy_enabled);
+    if let Err(e) = store.switch_to(&new_id, hot) {
+        return err_resp(format!("switch_to 失败: {}", e));
+    }
+    if let Err(e) = store.save() {
+        return err_resp(format!("保存失败: {}", e));
+    }
+    let to_name = store
+        .accounts
+        .get(&new_id)
+        .map(|a| a.name.clone())
+        .unwrap_or_default();
+
+    // 记录 switch_log
+    use tauri::Manager;
+    let app = state.app_handle.clone();
+    if let Some(logger) = app.try_state::<std::sync::Arc<crate::switch_log::SwitchLogger>>() {
+        logger.inner().log_switch(
+            from_name,
+            to_name.clone(),
+            crate::switch_log::SwitchReason::Http429,
+            None,
+            None,
+        );
+    }
+    let _ = app.emit("proxy-account-switched", &to_name);
+    let _ = app.emit("accounts-updated", ());
+
+    json_resp(
+        StatusCode::OK,
+        json!({
+            "switched": true,
+            "current": new_id,
+            "name": to_name,
+        }),
+    )
+}
+
+#[derive(Deserialize)]
+struct SoloHeartbeatPayload {
+    #[serde(default)]
+    ttl_secs: Option<i64>,
+}
+
+async fn handle_solo_heartbeat(req: Request<Incoming>) -> Response<ResponseBody> {
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => return err_resp(format!("读取 body 失败: {}", e)),
+    };
+    let payload: SoloHeartbeatPayload = if body.is_empty() {
+        SoloHeartbeatPayload { ttl_secs: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => SoloHeartbeatPayload { ttl_secs: None },
+        }
+    };
+    let ttl = payload
+        .ttl_secs
+        .unwrap_or(crate::account::SOLO_HEARTBEAT_TTL_SECS)
+        .clamp(30, 3600);
+    let until = chrono::Utc::now().timestamp() + ttl;
+    active_solo_until().store(until, Ordering::Relaxed);
+    json_resp(
+        StatusCode::OK,
+        json!({"ok": true, "active_until": until}),
+    )
+}
+
+#[derive(Deserialize)]
+struct SoloCurrentPayload {
+    current: String,
+}
+
+async fn handle_solo_current(
+    state: &Arc<ApiState>,
+    req: Request<Incoming>,
+) -> Response<ResponseBody> {
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => return err_resp(format!("读取 body 失败: {}", e)),
+    };
+    let payload: SoloCurrentPayload = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return json_resp(
+                StatusCode::BAD_REQUEST,
+                json!({"error": format!("JSON 解析失败: {}", e)}),
+            );
+        }
+    };
+    let new_id = payload.current;
+    let (from_name, to_name) = {
+        let mut store = match state.store.lock() {
+            Ok(s) => s,
+            Err(e) => return err_resp(format!("锁获取失败: {}", e)),
+        };
+        if !store.accounts.contains_key(&new_id) {
+            return json_resp(
+                StatusCode::NOT_FOUND,
+                json!({"error": "account not found"}),
+            );
+        }
+        let from = store
+            .current
+            .as_ref()
+            .and_then(|id| store.accounts.get(id))
+            .map(|a| a.name.clone());
+        // solo 模式仅同步 current 指针：不重选号、不刷新 auth.json（Server 可能并未使用）
+        store.current = Some(new_id.clone());
+        if let Err(e) = store.save() {
+            return err_resp(format!("保存失败: {}", e));
+        }
+        let to = store
+            .accounts
+            .get(&new_id)
+            .map(|a| a.name.clone())
+            .unwrap_or_default();
+        (from, to)
+    };
+    use tauri::Manager;
+    let app = state.app_handle.clone();
+    if let Some(logger) = app.try_state::<std::sync::Arc<crate::switch_log::SwitchLogger>>() {
+        logger.inner().log_switch(
+            from_name,
+            to_name.clone(),
+            crate::switch_log::SwitchReason::Manual,
+            None,
+            None,
+        );
+    }
+    let _ = app.emit("proxy-account-switched", &to_name);
+    let _ = app.emit("accounts-updated", ());
+    crate::tray::update_tray_menu(&app);
+    json_resp(StatusCode::OK, json!({"ok": true, "current": new_id}))
+}
+
+fn handle_list_skills() -> Response<ResponseBody> {
+    let names = crate::skills::list_local_skill_dirs();
+    json_resp(StatusCode::OK, json!({ "skills": names }))
+}
+
+async fn handle_upload_skill(req: Request<Incoming>, query: &str) -> Response<ResponseBody> {
+    let name = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("name="))
+        .map(|v| {
+            percent_decode(v)
+        })
+        .unwrap_or_default();
+    if name.is_empty() {
+        return json_resp(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "缺少 name 查询参数"}),
+        );
+    }
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => return err_resp(format!("读取 body 失败: {}", e)),
+    };
+    match crate::skills::extract_skill_zip(&name, &body) {
+        Ok(_) => json_resp(
+            StatusCode::OK,
+            json!({"ok": true, "name": name, "bytes": body.len()}),
+        ),
+        Err(e) => json_resp(StatusCode::BAD_REQUEST, json!({"error": e})),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(a), Some(b)) =
+                (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
+            {
+                out.push(a * 16 + b);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn resp_with_body(status: StatusCode, body: Vec<u8>) -> Response<ResponseBody> {

@@ -11,12 +11,17 @@ use std::sync::Mutex;
 pub enum SwitchReason {
     Manual,
     Http429,
+    /// SSE 流前缀里检测到 response.failed + 限额关键词，由 read_sse_bootstrap 触发
+    InStreamRateLimit,
+    /// SSE 流前缀里检测到 response.failed + 封号关键词
+    InStreamBanned,
     QuotaThreshold,
     WebSocketPrecheck,
     WebSocketRateLimit,
     BannedDetected,
     AutoQuotaRefresh,
     BackgroundKeepalive,
+    RemoteFallback,
 }
 
 impl std::fmt::Display for SwitchReason {
@@ -24,12 +29,15 @@ impl std::fmt::Display for SwitchReason {
         match self {
             SwitchReason::Manual => write!(f, "手动切号"),
             SwitchReason::Http429 => write!(f, "429 限额"),
+            SwitchReason::InStreamRateLimit => write!(f, "流内限额"),
+            SwitchReason::InStreamBanned => write!(f, "流内封号"),
             SwitchReason::QuotaThreshold => write!(f, "阈值预防"),
             SwitchReason::WebSocketPrecheck => write!(f, "WS 预检"),
             SwitchReason::WebSocketRateLimit => write!(f, "WS 限额"),
             SwitchReason::BannedDetected => write!(f, "封号检测"),
             SwitchReason::AutoQuotaRefresh => write!(f, "自动刷新"),
             SwitchReason::BackgroundKeepalive => write!(f, "后台保活"),
+            SwitchReason::RemoteFallback => write!(f, "Server 不可达回退"),
         }
     }
 }

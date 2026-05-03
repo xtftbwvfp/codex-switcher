@@ -22,6 +22,7 @@ interface DashboardProps {
     };
     onSyncWithDisk: () => void;
     onImportDiskAccount: (name: string) => void;
+    onForceOverwriteDisk: () => void;
 }
 
 export function Dashboard({
@@ -38,7 +39,9 @@ export function Dashboard({
     syncStatus,
     onSyncWithDisk,
     onImportDiskAccount,
+    onForceOverwriteDisk,
 }: DashboardProps) {
+    const isMismatched = !!(syncStatus && !syncStatus.is_synced);
     // 获取最佳账号推荐（配额最高的账号）
     const getBestAccount = () => {
         if (accounts.length === 0) return null;
@@ -103,12 +106,43 @@ export function Dashboard({
                                 )}
                             </div>
 
-                            <UsageCard
-                                usage={usage}
-                                loading={usageLoading}
-                                error={usageError}
-                                onRefresh={onRefreshUsage}
-                            />
+                            {isMismatched ? (
+                                <div className="mismatch-panel">
+                                    <div className="mismatch-headline">
+                                        与 ~/.codex/auth.json 身份不匹配
+                                    </div>
+                                    <div className="mismatch-detail">
+                                        IDE 当前用：<span className="mono">{syncStatus?.disk_email || '未知'}</span>
+                                    </div>
+                                    <div className="mismatch-actions">
+                                        <button
+                                            className="btn btn-primary btn-sm"
+                                            onClick={onForceOverwriteDisk}
+                                        >
+                                            用此账号覆盖 IDE
+                                        </button>
+                                        {syncStatus?.matching_id ? (
+                                            <button className="btn btn-ghost btn-sm" onClick={onSyncWithDisk}>
+                                                改用 IDE 当前
+                                            </button>
+                                        ) : (
+                                            <button
+                                                className="btn btn-ghost btn-sm"
+                                                onClick={() => onImportDiskAccount(syncStatus?.disk_email || '新账号')}
+                                            >
+                                                导入 IDE 当前
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            ) : (
+                                <UsageCard
+                                    usage={usage}
+                                    loading={usageLoading}
+                                    error={usageError}
+                                    onRefresh={onRefreshUsage}
+                                />
+                            )}
 
                             <button
                                 className="btn btn-outline btn-full"

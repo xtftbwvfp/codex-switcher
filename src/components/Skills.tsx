@@ -57,6 +57,8 @@ export function Skills() {
     const [detailContent, setDetailContent] = useState<string>('');
     const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
     const [confirmInput, setConfirmInput] = useState('');
+    const [remoteMode, setRemoteMode] = useState<string>('off');
+    const [syncingServer, setSyncingServer] = useState(false);
 
     // 新仓库表单
     const [newOwner, setNewOwner] = useState('');
@@ -99,6 +101,9 @@ export function Skills() {
         loadInstalled(true); // 首次加载时扫描补录新 skill
         loadRepos();
         loadAppStatus();
+        invoke<any>('get_settings')
+            .then(s => setRemoteMode(String(s?.remote_mode || 'off')))
+            .catch(() => {});
     }, []);
 
     const handleDiscover = async () => {
@@ -199,6 +204,28 @@ export function Skills() {
         }
     };
 
+    const handleSyncToServer = async () => {
+        if (syncingServer) return;
+        setSyncingServer(true);
+        try {
+            const r = await invoke<{ pushed: string[]; skipped: string[]; errors: [string, string][] }>(
+                'remote_sync_skills'
+            );
+            const parts = [`推送 ${r.pushed.length}`];
+            if (r.skipped.length) parts.push(`跳过 ${r.skipped.length}`);
+            if (r.errors.length) parts.push(`失败 ${r.errors.length}`);
+            if (r.errors.length) {
+                showMsg('error', `${parts.join('，')}：${r.errors[0][0]} - ${r.errors[0][1]}`);
+            } else {
+                showMsg('success', parts.join('，'));
+            }
+        } catch (e) {
+            showMsg('error', `同步到 Server 失败: ${e}`);
+        } finally {
+            setSyncingServer(false);
+        }
+    };
+
     const filtered = installed.filter(s =>
         s.name.toLowerCase().includes(search.toLowerCase()) ||
         s.description.toLowerCase().includes(search.toLowerCase())
@@ -239,7 +266,19 @@ export function Skills() {
                     className="search-input"
                 />
                 {tab === 'installed' && (
-                    <button className="btn btn-sm btn-ghost" onClick={handleSyncAll}>全量同步</button>
+                    <>
+                        <button className="btn btn-sm btn-ghost" onClick={handleSyncAll}>全量同步</button>
+                        {remoteMode === 'client' && (
+                            <button
+                                className="btn btn-sm btn-ghost"
+                                onClick={handleSyncToServer}
+                                disabled={syncingServer}
+                                title="将本机 SSOT 下所有 skill 推送到 Server（按黑名单跳过）"
+                            >
+                                {syncingServer ? '同步中...' : '同步到 Server'}
+                            </button>
+                        )}
+                    </>
                 )}
                 {tab === 'discover' && (
                     <button className="btn btn-sm btn-primary" onClick={handleDiscover} disabled={loading}>

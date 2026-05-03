@@ -15,12 +15,16 @@ interface AppSettings {
     proxy_enabled: boolean;
     proxy_port: number;
     proxy_allow_lan: boolean;
+    switch_mode: string;
     remote_mode: string;
     remote_server_port: number;
     remote_server_bind: string;
-    remote_mini_url: string;
-    remote_mini_url_fallback: string;
+    remote_server_url: string;
+    remote_server_url_fallback: string;
     remote_shared_secret: string;
+    solo_auto_sync_current: boolean;
+    proxy_bootstrap_byte_cap: number;
+    proxy_bootstrap_time_cap_ms: number;
 }
 
 interface RemoteHealth {
@@ -50,12 +54,16 @@ export function Settings() {
         proxy_enabled: false,
         proxy_port: 18080,
         proxy_allow_lan: false,
+        switch_mode: 'auto',
         remote_mode: 'off',
         remote_server_port: 18081,
         remote_server_bind: '0.0.0.0',
-        remote_mini_url: '',
-        remote_mini_url_fallback: '',
+        remote_server_url: '',
+        remote_server_url_fallback: '',
         remote_shared_secret: '',
+        solo_auto_sync_current: true,
+        proxy_bootstrap_byte_cap: 32 * 1024,
+        proxy_bootstrap_time_cap_ms: 8000,
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
@@ -120,22 +128,48 @@ export function Settings() {
         }
     };
 
+    const handleSoloSyncNow = () =>
+        withRemote('立即同号', async () => {
+            const switched = await invoke<string | null>('solo_sync_current');
+            return switched ? `已切换到 ${switched}` : '已与 Server 一致，无需切换';
+        });
+
     const handleRemoteTest = () =>
         withRemote('测试连接', async () => {
             const [url, h] = await invoke<[string, RemoteHealth]>('remote_probe');
-            return `使用 ${url}，Mini v${h.version}，远端账号数 ${h.account_count}`;
+            return `使用 ${url}，Server v${h.version}，远端账号数 ${h.account_count}`;
         });
 
     const handleRemotePushAll = () =>
-        withRemote('推送全部账号到 Mini', async () => {
+        withRemote('推送全部账号到 Server', async () => {
             const n = await invoke<number>('remote_push_all');
             return `已上传 ${n} 个账号`;
         });
 
     const handleRemotePullAll = () =>
-        withRemote('从 Mini 拉取全部账号', async () => {
+        withRemote('从 Server 拉取全部账号', async () => {
             const n = await invoke<number>('remote_pull_all');
             return `已合并 ${n} 个账号`;
+        });
+
+    const handleRemotePullAllTokens = () =>
+        withRemote('从 Server 同步所有 token', async () => {
+            const r = await invoke<{
+                pulled: number;
+                refreshed: number;
+                current: string | null;
+                current_name: string | null;
+                wrote_auth_json: boolean;
+                errors: [string, string][];
+            }>('remote_pull_all_tokens');
+            const parts = [
+                `账号 ${r.pulled}`,
+                `token ${r.refreshed}`,
+            ];
+            if (r.current_name) parts.push(`current=${r.current_name}`);
+            if (r.wrote_auth_json) parts.push('已写 auth.json');
+            if (r.errors.length > 0) parts.push(`错误 ${r.errors.length}`);
+            return parts.join(' · ');
         });
 
     const handleRemoteRestart = () =>
@@ -208,17 +242,24 @@ export function Settings() {
                 <div className="setting-item">
                     <div className="setting-info">
                         <span className="setting-label">后台保活与同步</span>
-                        <span className="setting-desc">当前账号只做权威回流；非活跃账号按独占策略保活刷新（保存后生效）</span>
+                        <span className="setting-desc">
+                            {settings.remote_mode === 'client'
+                                ? 'client 模式：保活由 Server 负责，本机已强制关闭（避免双路刷新撞飞 refresh_token）'
+                                : '当前账号只做权威回流；非活跃账号按独占策略保活刷新（保存后生效）'}
+                        </span>
                     </div>
                     <label className="toggle">
                         <input
                             type="checkbox"
-                            checked={settings.background_refresh}
+                            checked={settings.remote_mode === 'client' ? false : settings.background_refresh}
+                            disabled={settings.remote_mode === 'client'}
                             onChange={e => updateField('background_refresh', e.target.checked)}
                         />
                         <span className="toggle-slider"></span>
-                        <span className={`toggle-text ${settings.background_refresh ? 'on' : ''}`}>
-                            {settings.background_refresh ? '已开启' : '已关闭'}
+                        <span className={`toggle-text ${settings.background_refresh && settings.remote_mode !== 'client' ? 'on' : ''}`}>
+                            {settings.remote_mode === 'client'
+                                ? 'Server 负责'
+                                : settings.background_refresh ? '已开启' : '已关闭'}
                         </span>
                     </label>
                 </div>
@@ -239,7 +280,7 @@ export function Settings() {
                 </div>
 
                 {
-                    settings.background_refresh && (
+                    settings.background_refresh && settings.remote_mode !== 'client' && (
                         <>
                             <div className="setting-item sub-item">
                                 <div className="setting-info">
@@ -334,7 +375,8 @@ export function Settings() {
                     <div className="setting-info">
                         <span className="setting-label">工作模式</span>
                         <span className="setting-desc">
-                            off=独立；server=本机作为 Mini 提供账号 API；client=从 Mini 拉取 token（保存后生效）
+                            off=独立；server=Server 侧提供 API；client=从 Server 拉 token（全部走 Server）；
+                            solo=本机自治 + 切号/刷新后把结果推给 Server（Server 让位保活，断网不卡）
                         </span>
                     </div>
                     <select
@@ -343,8 +385,9 @@ export function Settings() {
                         onChange={e => updateField('remote_mode', e.target.value)}
                     >
                         <option value="off">off（关闭）</option>
-                        <option value="server">server（Mini 侧）</option>
-                        <option value="client">client（本机）</option>
+                        <option value="server">server（Server 侧）</option>
+                        <option value="client">client（本机，瘦客户端）</option>
+                        <option value="solo">solo（本机自治 + 推送）</option>
                     </select>
                 </div>
 
@@ -353,7 +396,7 @@ export function Settings() {
                         <div className="setting-item sub-item">
                             <div className="setting-info">
                                 <span className="setting-label">监听端口</span>
-                                <span className="setting-desc">Mini 侧 HTTP API 端口（默认 18081）</span>
+                                <span className="setting-desc">Server 侧 HTTP API 端口（默认 18081）</span>
                             </div>
                             <input
                                 type="number"
@@ -419,34 +462,34 @@ export function Settings() {
                     </>
                 )}
 
-                {settings.remote_mode === 'client' && (
+                {(settings.remote_mode === 'client' || settings.remote_mode === 'solo') && (
                     <>
                         <div className="setting-item sub-item">
                             <div className="setting-info">
-                                <span className="setting-label">Mini API 地址（主）</span>
+                                <span className="setting-label">Server API 地址（主）</span>
                                 <span className="setting-desc">优先尝试，建议填局域网 IP，如 http://192.168.2.14:18081</span>
                             </div>
                             <input
                                 type="text"
                                 className="text-input"
                                 style={{ minWidth: 260 }}
-                                value={settings.remote_mini_url}
-                                onChange={e => updateField('remote_mini_url', e.target.value)}
+                                value={settings.remote_server_url}
+                                onChange={e => updateField('remote_server_url', e.target.value)}
                                 placeholder="http://192.168.2.14:18081"
                             />
                         </div>
 
                         <div className="setting-item sub-item">
                             <div className="setting-info">
-                                <span className="setting-label">Mini API 地址（回退）</span>
+                                <span className="setting-label">Server API 地址（回退）</span>
                                 <span className="setting-desc">主不通时自动切换，建议填 ZeroTier IP，如 http://172.26.96.198:18081</span>
                             </div>
                             <input
                                 type="text"
                                 className="text-input"
                                 style={{ minWidth: 260 }}
-                                value={settings.remote_mini_url_fallback}
-                                onChange={e => updateField('remote_mini_url_fallback', e.target.value)}
+                                value={settings.remote_server_url_fallback}
+                                onChange={e => updateField('remote_server_url_fallback', e.target.value)}
                                 placeholder="http://172.26.96.198:18081"
                             />
                         </div>
@@ -454,7 +497,7 @@ export function Settings() {
                         <div className="setting-item sub-item">
                             <div className="setting-info">
                                 <span className="setting-label">共享密钥</span>
-                                <span className="setting-desc">必须与 Mini 端一致</span>
+                                <span className="setting-desc">必须与 Server 端一致</span>
                             </div>
                             <input
                                 type="text"
@@ -469,7 +512,7 @@ export function Settings() {
                         <div className="setting-item sub-item">
                             <div className="setting-info">
                                 <span className="setting-label">同步操作</span>
-                                <span className="setting-desc">测试连通性 / 推送本机账号 / 从 Mini 合并</span>
+                                <span className="setting-desc">测试连通性 / 推送本机账号 / 从 Server 合并</span>
                             </div>
                             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                                 <button className="action-button" onClick={handleRemoteTest} disabled={remoteBusy}>
@@ -481,8 +524,47 @@ export function Settings() {
                                 <button className="action-button" onClick={handleRemotePullAll} disabled={remoteBusy}>
                                     拉取合并
                                 </button>
+                                <button className="action-button" onClick={handleRemotePullAllTokens} disabled={remoteBusy}>
+                                    同步所有 token
+                                </button>
                             </div>
                         </div>
+
+                        {settings.remote_mode === 'solo' && (
+                            <>
+                                <div className="setting-item sub-item">
+                                    <div className="setting-info">
+                                        <span className="setting-label">自动同号</span>
+                                        <span className="setting-desc">
+                                            心跳时自动把本机 current 对齐到 Server 的 current。
+                                            Server 不可达会静默跳过，保持本机现状。
+                                        </span>
+                                    </div>
+                                    <label className="toggle">
+                                        <input
+                                            type="checkbox"
+                                            checked={settings.solo_auto_sync_current}
+                                            onChange={e => updateField('solo_auto_sync_current', e.target.checked)}
+                                        />
+                                        <span className="toggle-slider"></span>
+                                    </label>
+                                </div>
+
+                                <div className="setting-item sub-item">
+                                    <div className="setting-info">
+                                        <span className="setting-label">立即同号</span>
+                                        <span className="setting-desc">手工拉取 Server 当前账号并热切过去（自动同号关了也可用）</span>
+                                    </div>
+                                    <button
+                                        className="action-button"
+                                        onClick={handleSoloSyncNow}
+                                        disabled={remoteBusy}
+                                    >
+                                        {remoteBusy ? '执行中...' : '立即同号'}
+                                    </button>
+                                </div>
+                            </>
+                        )}
                     </>
                 )}
 

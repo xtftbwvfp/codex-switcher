@@ -72,6 +72,11 @@ pub struct AppSettings {
     #[serde(default)]
     pub notify_on_switch: bool,
 
+    /// 切号模式：auto（代理开=热切，代理关=冷切）/ cold（强制冷切）
+    /// 热切 = 只改 store.current + 失效代理缓存，不写 ~/.codex/auth.json
+    #[serde(default = "default_switch_mode")]
+    pub switch_mode: String,
+
     /// 切号时注入消息到 Codex 对话（实验性）
     #[serde(default)]
     pub inject_switch_message: bool,
@@ -101,17 +106,43 @@ pub struct AppSettings {
     #[serde(default = "default_remote_server_bind")]
     pub remote_server_bind: String,
 
-    /// client 模式下 Mini 地址 (e.g. "http://192.168.2.14:18081")
+    /// client 模式下 Server 地址 (e.g. "http://192.168.2.14:18081")
     #[serde(default)]
-    pub remote_mini_url: String,
+    pub remote_server_url: String,
 
     /// client 模式下的回退地址（primary 不通时尝试），一般放 ZeroTier URL
     #[serde(default)]
-    pub remote_mini_url_fallback: String,
+    pub remote_server_url_fallback: String,
 
     /// 两端共用的认证密钥（X-Auth-Token 头）
     #[serde(default)]
     pub remote_shared_secret: String,
+
+    /// client 模式下，同步到 Server 时要跳过的 skill 目录名
+    #[serde(default)]
+    pub skills_sync_blacklist: Vec<String>,
+
+    /// solo 模式：心跳时自动把本机 current 对齐到 Server 的 current
+    /// 关掉后允许两端 current 不一致；但手工一键同号仍可用。
+    #[serde(default = "default_true")]
+    pub solo_auto_sync_current: bool,
+
+    /// SSE bootstrap 的缓冲字节上限（拦截 mid-stream 限额错误的窗口大小）。
+    /// 正常请求几 KB 就过窗，配大点不会有副作用，反而能在慢启动模型上有更多嗅探机会。
+    #[serde(default = "default_bootstrap_byte_cap")]
+    pub proxy_bootstrap_byte_cap: usize,
+
+    /// SSE bootstrap 的时间上限（毫秒）。配合 SSE keep-alive 心跳可以放心拉大。
+    #[serde(default = "default_bootstrap_time_cap_ms")]
+    pub proxy_bootstrap_time_cap_ms: u64,
+}
+
+fn default_bootstrap_byte_cap() -> usize {
+    32 * 1024
+}
+
+fn default_bootstrap_time_cap_ms() -> u64 {
+    8000
 }
 
 fn default_theme_palette() -> String {
@@ -134,6 +165,10 @@ fn default_false() -> bool {
     false
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_proxy_port() -> u16 {
     18080
 }
@@ -149,6 +184,40 @@ fn default_quota_refresh_batch() -> u32 {
 fn default_remote_mode() -> String {
     "off".to_string()
 }
+
+fn default_switch_mode() -> String {
+    "auto".to_string()
+}
+
+/// 决定本次切号是否使用热切：
+/// - switch_mode="cold" 永远冷切
+/// - switch_mode="auto"（默认）代理开=热切；代理关=冷切（热切此时没意义）
+pub fn should_hot_switch(settings: &AppSettings, proxy_running: bool) -> bool {
+    match settings.switch_mode.as_str() {
+        "cold" => false,
+        _ => proxy_running,
+    }
+}
+
+/// remote_mode="client"：本机不持 token，读/切全走 Server
+pub fn is_remote_client(mode: &str) -> bool {
+    mode == "client"
+}
+
+/// remote_mode="solo"：本机自治但把 refresh/switch push 给 Server 做归档
+pub fn is_remote_solo(mode: &str) -> bool {
+    mode == "solo"
+}
+
+/// 需要把本机账号变更推给 Server 的模式（client 登录新号时也要推；solo 每次都推）
+pub fn pushes_to_server(mode: &str) -> bool {
+    matches!(mode, "client" | "solo")
+}
+
+/// solo 模式心跳间隔（秒）
+pub const SOLO_HEARTBEAT_INTERVAL_SECS: u64 = 120;
+/// solo 模式心跳在 Server 侧的 TTL（秒）。Server 超过这个时间没收到心跳 → 恢复保活
+pub const SOLO_HEARTBEAT_TTL_SECS: i64 = 300;
 
 fn default_remote_server_port() -> u16 {
     18081
@@ -177,15 +246,20 @@ impl Default for AppSettings {
             proxy_free_guard: 0,
             notify_on_switch: false,
             inject_switch_message: false,
+            switch_mode: default_switch_mode(),
             quota_refresh_enabled: false,
             quota_refresh_interval: default_quota_refresh_interval(),
             quota_refresh_batch: default_quota_refresh_batch(),
             remote_mode: default_remote_mode(),
             remote_server_port: default_remote_server_port(),
             remote_server_bind: default_remote_server_bind(),
-            remote_mini_url: String::new(),
-            remote_mini_url_fallback: String::new(),
+            remote_server_url: String::new(),
+            remote_server_url_fallback: String::new(),
             remote_shared_secret: String::new(),
+            skills_sync_blacklist: Vec::new(),
+            solo_auto_sync_current: true,
+            proxy_bootstrap_byte_cap: default_bootstrap_byte_cap(),
+            proxy_bootstrap_time_cap_ms: default_bootstrap_time_cap_ms(),
         }
     }
 }
@@ -280,10 +354,6 @@ fn default_five_hour_label() -> String {
 
 fn default_weekly_label() -> String {
     "周限额".to_string()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// 账号存储结构
@@ -461,26 +531,25 @@ impl AccountStore {
     }
 
     /// 切换到指定账号
-    pub fn switch_to(&mut self, id: &str) -> Result<(), String> {
+    pub fn switch_to(&mut self, id: &str, hot: bool) -> Result<(), String> {
         let account = self
             .accounts
             .get_mut(id)
             .ok_or_else(|| format!("账号不存在: {}", id))?;
 
-        // 对齐 Codex：切换时不主动刷新 refresh_token，直接写入目标账号 auth.json。
-        // 后续 token 生命周期由 Codex 自己在真实请求中按需维护。
-
-        // 更新最后使用时间
         account.last_used = Some(Utc::now());
 
-        // 写入 auth.json
-        println!("正在切换账号: {}", id);
-        Self::write_codex_auth(&account.auth_json)?;
-        println!("账号切换成功: auth.json 已更新");
+        if hot {
+            // 热切：不写 auth.json。Codex App 内存里的账号不会变，但代理会用新号的 token
+            // 替换所有请求的 Authorization 头。前提是代理在跑。
+            println!("正在切换账号（热切，跳过写 auth.json）: {}", id);
+        } else {
+            println!("正在切换账号（冷切，写 auth.json）: {}", id);
+            Self::write_codex_auth(&account.auth_json)?;
+            println!("账号切换成功: auth.json 已更新");
+        }
 
-        // 更新当前账号
         self.current = Some(id.to_string());
-
         Ok(())
     }
 

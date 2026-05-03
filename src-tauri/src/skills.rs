@@ -711,3 +711,215 @@ fn find_skill_dir(root: &std::path::Path, directory: &str) -> Option<PathBuf> {
 
     walk(root, directory)
 }
+
+// ────────────────────────────────────────────────────────────────
+// Remote 同步（打包/解包）
+// ────────────────────────────────────────────────────────────────
+
+fn should_skip_entry(name: &str) -> bool {
+    matches!(
+        name,
+        "__pycache__" | ".DS_Store" | "node_modules" | ".git" | ".venv" | "target"
+    )
+}
+
+fn should_skip_file(name: &str) -> bool {
+    name.ends_with(".pyc") || name.ends_with(".pyo") || name == ".DS_Store"
+}
+
+/// 列出 SSOT 目录下的所有 skill 子目录名（不含 SKILL.md 校验，仅目录）
+pub fn list_skill_dirs_at(root: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if should_skip_entry(name) {
+            continue;
+        }
+        out.push(name.to_string());
+    }
+    out.sort();
+    out
+}
+
+pub fn list_local_skill_dirs() -> Vec<String> {
+    list_skill_dirs_at(&ssot_dir())
+}
+
+/// 把 SSOT 下的一个 skill 目录打成 zip，返回字节流。过滤缓存文件。
+pub fn zip_skill_dir(name: &str) -> Result<Vec<u8>, String> {
+    use std::io::{Cursor, Read, Write};
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    let root = ssot_dir().join(name);
+    if !root.is_dir() {
+        return Err(format!("skill 目录不存在: {}", name));
+    }
+
+    let buf: Vec<u8> = Vec::new();
+    let mut zip = ZipWriter::new(Cursor::new(buf));
+    let opts = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o644);
+    let dir_opts = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Stored)
+        .unix_permissions(0o755);
+
+    fn walk(
+        dir: &std::path::Path,
+        prefix: &std::path::Path,
+        zip: &mut ZipWriter<Cursor<Vec<u8>>>,
+        opts: &SimpleFileOptions,
+        dir_opts: &SimpleFileOptions,
+    ) -> Result<(), String> {
+        let rd = std::fs::read_dir(dir).map_err(|e| format!("读取目录失败 {:?}: {}", dir, e))?;
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if path.is_dir() {
+                if should_skip_entry(&name) {
+                    continue;
+                }
+                let rel = path.strip_prefix(prefix).unwrap_or(&path);
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                let entry_name = format!("{}/", rel_str);
+                zip.add_directory(entry_name, *dir_opts)
+                    .map_err(|e| format!("添加目录失败: {}", e))?;
+                walk(&path, prefix, zip, opts, dir_opts)?;
+            } else if path.is_file() {
+                if should_skip_file(&name) {
+                    continue;
+                }
+                let rel = path.strip_prefix(prefix).unwrap_or(&path);
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                let mut file_opts = *opts;
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        file_opts = file_opts.unix_permissions(meta.permissions().mode() & 0o777);
+                    }
+                    let _ = meta;
+                }
+                zip.start_file(rel_str, file_opts)
+                    .map_err(|e| format!("开始文件失败: {}", e))?;
+                let mut f = std::fs::File::open(&path)
+                    .map_err(|e| format!("打开文件失败 {:?}: {}", path, e))?;
+                let mut data = Vec::new();
+                f.read_to_end(&mut data)
+                    .map_err(|e| format!("读取文件失败: {}", e))?;
+                zip.write_all(&data)
+                    .map_err(|e| format!("写入 zip 失败: {}", e))?;
+            }
+        }
+        Ok(())
+    }
+
+    walk(&root, &ssot_dir(), &mut zip, &opts, &dir_opts)?;
+    let cursor = zip.finish().map_err(|e| format!("finish zip 失败: {}", e))?;
+    Ok(cursor.into_inner())
+}
+
+/// 从 zip 字节流原子恢复一个 skill 目录到 SSOT。已存在则先备份再覆盖。
+pub fn extract_skill_zip(name: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::{Cursor, Read, Write};
+    use zip::ZipArchive;
+
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err(format!("非法 skill 名: {}", name));
+    }
+
+    let ssot = ssot_dir();
+    std::fs::create_dir_all(&ssot).map_err(|e| format!("创建 SSOT 失败: {}", e))?;
+
+    let target = ssot.join(name);
+    let ts = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let staging = ssot.join(format!(".{}.staging.{}", name, ts));
+    let backup = ssot.join(format!(".{}.backup.{}", name, ts));
+
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| format!("创建 staging 失败: {}", e))?;
+
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .map_err(|e| format!("打开 zip 失败: {}", e))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("读取 zip 条目失败: {}", e))?;
+        let raw_name = match entry.enclosed_name() {
+            Some(p) => p.to_path_buf(),
+            None => return Err(format!("zip 条目名非法: {}", entry.name())),
+        };
+        // 顶层必须是 <name>/...
+        let mut comps = raw_name.components();
+        let first = comps
+            .next()
+            .ok_or_else(|| "zip 条目缺少顶层目录".to_string())?;
+        if first.as_os_str() != std::ffi::OsStr::new(name) {
+            return Err(format!(
+                "zip 顶层目录 {:?} 与期望 {} 不一致",
+                first, name
+            ));
+        }
+        let rel: std::path::PathBuf = comps.collect();
+        let dest = staging.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest).map_err(|e| format!("创建目录失败: {}", e))?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("创建父目录失败: {}", e))?;
+            }
+            let mut out = std::fs::File::create(&dest)
+                .map_err(|e| format!("创建文件失败 {:?}: {}", dest, e))?;
+            let mut data = Vec::new();
+            entry
+                .read_to_end(&mut data)
+                .map_err(|e| format!("读取 zip 内容失败: {}", e))?;
+            out.write_all(&data)
+                .map_err(|e| format!("写入文件失败: {}", e))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = entry.unix_mode() {
+                    let _ = std::fs::set_permissions(
+                        &dest,
+                        std::fs::Permissions::from_mode(mode),
+                    );
+                }
+            }
+        }
+    }
+
+    // 原子替换：如果已有 target，先 rename 到 backup，再 rename staging 到 target
+    if target.exists() {
+        std::fs::rename(&target, &backup)
+            .map_err(|e| format!("备份原目录失败: {}", e))?;
+    }
+    match std::fs::rename(&staging, &target) {
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&backup);
+            Ok(())
+        }
+        Err(e) => {
+            // 回滚
+            if backup.exists() {
+                let _ = std::fs::rename(&backup, &target);
+            }
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(format!("替换 skill 失败: {}", e))
+        }
+    }
+}

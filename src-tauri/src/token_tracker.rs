@@ -64,8 +64,15 @@ pub struct TokenHistoryEntry {
     pub timestamp: DateTime<Utc>,
     pub model: String,
     pub input_tokens: i64,
+    #[serde(default)]
+    pub cached_input_tokens: i64,
     pub output_tokens: i64,
     pub cost: f64,
+    /// 本次请求按命中 cache 节省的金额（相对于全价 input）
+    #[serde(default)]
+    pub cost_saved_usd: f64,
+    #[serde(default)]
+    pub account_id: String,
 }
 
 /// 单次请求的 usage 数据
@@ -76,6 +83,7 @@ pub struct RequestUsage {
     pub output_tokens: i64,
     pub total_tokens: i64,
     pub model: String,
+    pub account_id: String,
 }
 
 /// 累计统计数据
@@ -101,6 +109,10 @@ pub struct ModelUsage {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub cached_input_tokens: i64,
+    #[serde(default)]
+    pub cost_saved_usd: f64,
 }
 
 impl Default for UsageStats {
@@ -150,6 +162,10 @@ impl TokenTracker {
             + usage.cached_input_tokens as f64 * pricing.cached_input_per_million
             + usage.output_tokens as f64 * pricing.output_per_million)
             / 1_000_000.0;
+        // cache 命中节省的钱 = 命中 token 数 × (full input price − cached input price)
+        let cost_saved = (usage.cached_input_tokens as f64
+            * (pricing.input_per_million - pricing.cached_input_per_million))
+            / 1_000_000.0;
 
         if let Ok(mut stats) = self.stats.lock() {
             stats.total_input_tokens += usage.input_tokens;
@@ -166,10 +182,14 @@ impl TokenTracker {
                     input_tokens: 0,
                     output_tokens: 0,
                     cost_usd: 0.0,
+                    cached_input_tokens: 0,
+                    cost_saved_usd: 0.0,
                 });
             model_entry.input_tokens += usage.input_tokens;
             model_entry.output_tokens += usage.output_tokens;
             model_entry.cost_usd += cost;
+            model_entry.cached_input_tokens += usage.cached_input_tokens;
+            model_entry.cost_saved_usd += cost_saved;
 
             // 持久化累计值
             Self::save_to_disk(&stats);
@@ -180,8 +200,11 @@ impl TokenTracker {
             timestamp: Utc::now(),
             model: usage.model,
             input_tokens: usage.input_tokens,
+            cached_input_tokens: usage.cached_input_tokens,
             output_tokens: usage.output_tokens,
             cost,
+            cost_saved_usd: cost_saved,
+            account_id: usage.account_id,
         };
         Self::append_history(&entry);
     }
@@ -316,6 +339,7 @@ pub fn extract_usage_from_sse(data: &[u8], request_model: &str) -> Option<Reques
                     output_tokens,
                     total_tokens,
                     model,
+                    account_id: String::new(),
                 });
             }
         }
