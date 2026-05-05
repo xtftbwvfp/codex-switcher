@@ -2397,19 +2397,32 @@ async fn handle_websocket(
                 || err_lower.contains("403")
                 || err_lower.contains("unauthorized")
                 || err_lower.contains("forbidden");
+            // 上游 WS 握手就被拒：大多数情况都该走切号重连而不是把错误透回 codex。
+            // - 401/403：当前号 token / 权限问题，换号
+            // - 429 / 限额关键词：当前号配额满，换号
+            // - 503 / "at capacity" / "model overloaded"：模型池满载，**换号也可能换池**
+            // 真正网络层错误（DNS / TLS / connect refused 等）才报给 client。
+            let is_capacity_err = err_lower.contains("429")
+                || err_lower.contains("503")
+                || err_lower.contains("502")
+                || err_lower.contains("504")
+                || RATE_LIMIT_KEYWORDS.iter().any(|kw| err_lower.contains(kw));
 
-            if !is_auth_err {
-                eprintln!("[Proxy] WebSocket 上游连接失败: {}", e);
+            if !is_auth_err && !is_capacity_err {
+                eprintln!("[Proxy] WebSocket 上游连接失败（网络层）: {}", e);
                 return Ok(error_response(
                     StatusCode::BAD_GATEWAY,
                     &format!("WebSocket 上游连接失败: {}", e),
                 ));
             }
 
-            println!("[Proxy] WebSocket 认证失败 ({}), 尝试切号重连...", e);
+            println!(
+                "[Proxy] WebSocket 握手被上游拒绝 ({})，尝试切号重连...",
+                if is_auth_err { "auth" } else { "capacity/限额" }
+            );
             mark_current_quota_depleted(&state);
 
-            // 切号重连，最多试 3 个号
+            // 切号重连，最多试 3 个号；连不上也算这个号当前不可用，标 depleted 避免重复挑
             let mut retry_conn = None;
             for _attempt in 0..3 {
                 if let PickResult::Found { id, token: new_tok } = pick_next_account(&state) {
@@ -2429,10 +2442,20 @@ async fn handle_websocket(
                         if let Ok(av) = HeaderValue::from_str(&format!("Bearer {}", new_tok)) {
                             r.headers_mut().insert(hyper::header::AUTHORIZATION, av);
                         }
-                        if let Ok(c) = tokio_tungstenite::connect_async(r).await {
-                            println!("[Proxy] WebSocket 切号重连成功");
-                            retry_conn = Some(c);
-                            break;
+                        match tokio_tungstenite::connect_async(r).await {
+                            Ok(c) => {
+                                println!("[Proxy] WebSocket 切号重连成功（{}）", id);
+                                retry_conn = Some(c);
+                                break;
+                            }
+                            Err(e2) => {
+                                println!(
+                                    "[Proxy] 切号到 {} 后仍连不上（{}），继续试下一个",
+                                    id, e2
+                                );
+                                // 这个号也用不了 → 标耗尽，下一轮 pick 不会再选
+                                mark_current_quota_depleted(&state);
+                            }
                         }
                     }
                 } else {
