@@ -577,6 +577,16 @@ fn bulk_import_accounts(
 
     // 落库：按 email 去重 —— 已有同名账号就跳过（不覆盖现有 token，避免误伤）
     let mut info = Vec::new();
+    let mut newly_added_ids: Vec<String> = Vec::new();
+    let (remote_mode, server_url, server_url_fallback, secret) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        (
+            store.settings.remote_mode.clone(),
+            store.settings.remote_server_url.clone(),
+            store.settings.remote_server_url_fallback.clone(),
+            store.settings.remote_shared_secret.clone(),
+        )
+    };
     {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         let existing_emails: std::collections::HashSet<String> = store
@@ -588,7 +598,8 @@ fn bulk_import_accounts(
             if existing_emails.contains(&p.email) {
                 continue;
             }
-            let _ = store.add_account(p.email.clone(), p.auth_json.clone(), None);
+            let acc = store.add_account(p.email.clone(), p.auth_json.clone(), None);
+            newly_added_ids.push(acc.id.clone());
             info.push(bulk_import::BulkParsedAccountInfo {
                 email: p.email.clone(),
                 plan_type: p.plan_type.clone(),
@@ -599,6 +610,43 @@ fn bulk_import_accounts(
         store.save()?;
     }
     crate::tray::update_tray_menu(&app);
+
+    // client / solo 模式：把新导入的账号推到 Server，让 Server 接管刷新 + 配额查询
+    // 否则后续 UI 刷新会调 remote_refresh_account_quota → Server 找不到账号
+    if account::pushes_to_server(&remote_mode) && !secret.is_empty() && !newly_added_ids.is_empty() {
+        let store_arc = state.store.clone();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let base = match remote_client::resolve_base_url(&server_url, &server_url_fallback).await {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[BulkImport] Server 不可达，跳过 push: {}", e);
+                    return;
+                }
+            };
+            let mut pushed = 0;
+            for id in newly_added_ids {
+                let account_clone = {
+                    let s = match store_arc.lock() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    match s.accounts.get(&id) {
+                        Some(a) => a.clone(),
+                        None => continue,
+                    }
+                };
+                match remote_client::upsert_account(&base, &secret, &account_clone).await {
+                    Ok(_) => pushed += 1,
+                    Err(e) => eprintln!("[BulkImport] push {} 失败: {}", account_clone.name, e),
+                }
+            }
+            if pushed > 0 {
+                println!("[BulkImport] 批量导入后已推 {} 个账号到 Server", pushed);
+                let _ = app_clone.emit("accounts-updated", ());
+            }
+        });
+    }
 
     Ok(bulk_import::BulkImportResult {
         summaries,
@@ -3157,6 +3205,7 @@ async fn remote_fetch_token(
 }
 
 /// client 模式下由 Server 完成一次 token 刷新 + usage 拉取，并把结果同步到本机 cached_quota。
+/// 如果 Server 那边没有这个账号（404 / not_found），fallback 到本地直查（用本机 store 里的 token）。
 #[tauri::command]
 async fn remote_refresh_account_quota(
     state: State<'_, AppState>,
@@ -3164,18 +3213,38 @@ async fn remote_refresh_account_quota(
     id: String,
 ) -> Result<UsageDisplay, String> {
     let (url, secret) = client_settings_snapshot(&state).await?;
-    let usage = remote_client::refresh_account_quota(&url, &secret, &id).await?;
-    if let Ok(mut store) = state.store.lock() {
-        if let Some(acc) = store.accounts.get_mut(&id) {
-            acc.cached_quota = Some(usage_to_cached(&usage));
-            acc.is_banned = false;
-            acc.is_token_invalid = false;
-            acc.is_logged_out = false;
-            let _ = store.save();
+    match remote_client::refresh_account_quota(&url, &secret, &id).await {
+        Ok(usage) => {
+            if let Ok(mut store) = state.store.lock() {
+                if let Some(acc) = store.accounts.get_mut(&id) {
+                    acc.cached_quota = Some(usage_to_cached(&usage));
+                    acc.is_banned = false;
+                    acc.is_token_invalid = false;
+                    acc.is_logged_out = false;
+                    let _ = store.save();
+                }
+            }
+            let _ = app.emit("accounts-updated", ());
+            Ok(usage)
+        }
+        Err(e) => {
+            // Server 那边可能根本没有这个账号（典型场景：刚批量导入到本机的账号还没推到 Server）
+            // → fallback 到本地直查，用本机 store 里的 token / refresh_token 跑一次 fetch_usage_direct
+            let lower = e.to_lowercase();
+            let is_missing = lower.contains("not_found")
+                || lower.contains("not found")
+                || lower.contains("404")
+                || lower.contains("account") && lower.contains("not");
+            if !is_missing {
+                return Err(e);
+            }
+            println!(
+                "[Quota] Server 没有账号 {}，fallback 到本地直查（可能是刚导入未推 Server）",
+                id
+            );
+            get_quota_by_id(state, app, id).await
         }
     }
-    let _ = app.emit("accounts-updated", ());
-    Ok(usage)
 }
 
 #[derive(serde::Serialize)]
