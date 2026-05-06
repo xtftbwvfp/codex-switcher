@@ -3362,6 +3362,32 @@ fn remote_restart_server(state: State<AppState>, app: tauri::AppHandle) -> Resul
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 把 stdout/stderr 重定向到 ~/.codex-switcher/proxy.log
+    // 兼容 GUI 启动（Mac App double-click / Tauri build），让所有 println! / eprintln! 落盘
+    if let Some(home) = dirs::home_dir() {
+        let dir = home.join(".codex-switcher");
+        let _ = std::fs::create_dir_all(&dir);
+        let log_path = dir.join("proxy.log");
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            use std::os::unix::io::IntoRawFd;
+            let fd = file.into_raw_fd();
+            unsafe {
+                libc::dup2(fd, 1);
+                libc::dup2(fd, 2);
+                libc::close(fd);
+            }
+            eprintln!(
+                "\n=== codex-switcher started {} pid={} ===",
+                chrono::Utc::now().to_rfc3339(),
+                std::process::id()
+            );
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
