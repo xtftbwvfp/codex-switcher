@@ -1062,7 +1062,8 @@ async fn handle_request(
         let body_lower = String::from_utf8_lossy(&resp_bytes).to_lowercase();
         let is_capacity = matches_global_capacity(&body_lower)
             || status_code == reqwest::StatusCode::SERVICE_UNAVAILABLE
-            || body_lower.contains("server_overloaded");
+            || body_lower.contains("server_is_overloaded")
+            || body_lower.contains("slow_down");
         if is_capacity {
             println!("[Proxy] 上游 {} + 容量满，同号 backoff retry...", status_code);
             for attempt in 1..=3u64 {
@@ -3020,7 +3021,15 @@ const PER_ACCOUNT_LIMIT_KEYWORDS: &[&str] = &[
 ];
 
 /// global 容量满信号 —— 命中应该同号 backoff retry，不切号
+///
+/// 关键：codex 二进制识别的真正错误码是 `server_is_overloaded`（注意中间的 `_is_`）和
+/// `slow_down`，证据：codex-rs/codex-api/src/sse/responses.rs:566-570 +
+/// api_bridge.rs:45-56。`Selected model is at capacity. Please try a different model.`
+/// 是 codex 内部硬编码字符串（protocol/src/error.rs:111），不会出现在 wire data 里。
+/// 所以匹配 wire 数据必须包含 server_is_overloaded / slow_down。
 const GLOBAL_CAPACITY_KEYWORDS: &[&str] = &[
+    "server_is_overloaded",  // ★ codex 真正认的错误码
+    "slow_down",             // ★ 同上
     "at capacity",
     "selected model is at capacity",
     "try a different model",
@@ -3041,6 +3050,9 @@ fn matches_global_capacity(lower: &str) -> bool {
 
 /// 老 const，保留是为了避免改太多调用点；语义保持"任何限额/容量信号"。
 const RATE_LIMIT_KEYWORDS: &[&str] = &[
+    // codex 二进制实际识别的错误码（codex-rs/codex-api/src/sse/responses.rs:566-570）
+    "server_is_overloaded",  // ★ 真正的 capacity 错误码（中间有 _is_）
+    "slow_down",             // ★ 同上
     "rate_limit",
     "rate limit",
     "usage_limit",
@@ -3100,13 +3112,15 @@ fn detect_ws_rate_limit(msg: &tungstenite::Message) -> bool {
         }
 
         // JSON 解析失败或没有 error 字段，但文本明确包含限额/容量满消息
-        if lower.contains("hit your usage limit")
+        // 注意：server_is_overloaded 才是 codex 真正认的（有 _is_），不是 server_overloaded
+        if lower.contains("server_is_overloaded")
+            || lower.contains("slow_down")
+            || lower.contains("hit your usage limit")
             || lower.contains("rate limit reached")
             || lower.contains("too many requests")
             || lower.contains("at capacity")
             || lower.contains("try a different model")
             || lower.contains("model overloaded")
-            || lower.contains("server_overloaded")
         {
             println!("[Proxy] WS 限额/容量满: 文本兜底匹配");
             return true;
