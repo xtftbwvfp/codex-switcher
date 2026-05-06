@@ -1274,9 +1274,10 @@ async fn try_remote_switch_and_retry(
                 return None;
             }
         };
-        // 切号到新账号 → prompt_cache_key 拼 account_id
+        // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
         let body_for_new = rewrite_prompt_cache_key(body, &new_current);
-        match forward_and_bootstrap(state, method, upstream_url, base_headers, &body_for_new, &new_token, session_key)
+        let headers_no_ts = headers_without_turn_state(base_headers);
+        match forward_and_bootstrap(state, method, upstream_url, &headers_no_ts, &body_for_new, &new_token, session_key)
             .await
         {
             BootstrappedForward::Ok(resp) => {
@@ -1375,13 +1376,14 @@ async fn try_switch_and_retry(
                     eprintln!("[Proxy] 切号失败: {}", e);
                     continue;
                 }
-                // 切号到新账号 → prompt_cache_key 拼 account_id 让 cache 按账号隔离
+                // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
                 let body_for_new = rewrite_prompt_cache_key(body, &id);
+                let headers_no_ts = headers_without_turn_state(base_headers);
                 match forward_and_bootstrap(
                     state,
                     method,
                     upstream_url,
-                    base_headers,
+                    &headers_no_ts,
                     &body_for_new,
                     &token,
                     session_key,
@@ -1452,6 +1454,19 @@ fn derive_server_proxy_url(api_url: &str, proxy_port: u16) -> Option<String> {
     let u = reqwest::Url::parse(api_url.trim()).ok()?;
     let host = u.host_str()?;
     Some(format!("{}://{}:{}", u.scheme(), host, proxy_port))
+}
+
+/// 切号到新账号时调用：复制 headers + 剥掉 `x-codex-turn-state`。
+/// 这个 header 是 OpenAI 服务端给的 sticky-routing token，绑定到颁发它的账号/分片。
+/// 老账号的 turn-state 在新账号上无效甚至有害（可能 401 或路由错误）。
+/// codex-rs 自己的 client.rs:360-370 注释也明说"must not send between different turns"。
+/// 切号 = 跨 turn，必须剥。
+fn headers_without_turn_state(
+    base: &reqwest::header::HeaderMap,
+) -> reqwest::header::HeaderMap {
+    let mut h = base.clone();
+    h.remove("x-codex-turn-state");
+    h
 }
 
 /// 构造上游请求的透明转发 header（剔除 host/authorization/connection，注入上游 Host）
@@ -1555,9 +1570,10 @@ async fn try_local_fallback(
     let is_chatgpt = token.starts_with("eyJ");
     let (upstream_url, upstream_host) = get_upstream(is_chatgpt, path_and_query);
     let base_headers = build_upstream_headers(req_headers, upstream_host);
-    // 切号到新账号 → prompt_cache_key 拼 account_id
+    // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
     let body_for_new = rewrite_prompt_cache_key(body, &id);
-    match forward_and_bootstrap(state, method, &upstream_url, &base_headers, &body_for_new, &token, session_key).await {
+    let headers_no_ts = headers_without_turn_state(&base_headers);
+    match forward_and_bootstrap(state, method, &upstream_url, &headers_no_ts, &body_for_new, &token, session_key).await {
         BootstrappedForward::Ok(resp) => {
             println!("[Proxy] 本地回退转发成功");
             Some(resp)
@@ -2147,9 +2163,10 @@ async fn acquire_replacement_upstream(
         adopt_remote_current(state, &base, &secret, &new_current).await.ok()?;
         invalidate_remote_token_cache();
         let (new_token, _) = get_current_token(state).await.ok()?;
-        // 切号到新账号 → prompt_cache_key 拼 account_id
+        // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
         let body_for_new = rewrite_prompt_cache_key(body, &new_current);
-        let resp = forward_with_token(state, method, upstream_url, base_headers, &body_for_new, &new_token).await.ok()?;
+        let headers_no_ts = headers_without_turn_state(base_headers);
+        let resp = forward_with_token(state, method, upstream_url, &headers_no_ts, &body_for_new, &new_token).await.ok()?;
         if resp.status() != reqwest::StatusCode::OK {
             return None;
         }
@@ -2160,9 +2177,10 @@ async fn acquire_replacement_upstream(
     let pick = pick_next_account(state);
     let PickResult::Found { id, token } = pick else { return None; };
     do_switch(state, &id, reason).ok()?;
-    // 切号到新账号 → prompt_cache_key 拼 account_id
+    // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
     let body_for_new = rewrite_prompt_cache_key(body, &id);
-    let resp = forward_with_token(state, method, upstream_url, base_headers, &body_for_new, &token).await.ok()?;
+    let headers_no_ts = headers_without_turn_state(base_headers);
+    let resp = forward_with_token(state, method, upstream_url, &headers_no_ts, &body_for_new, &token).await.ok()?;
     if resp.status() != reqwest::StatusCode::OK {
         return None;
     }
@@ -2182,7 +2200,10 @@ async fn bootstrap_loop_task(
     tx: tokio::sync::mpsc::Sender<Result<Bytes, reqwest::Error>>,
 ) {
     let (byte_cap, time_cap_ms) = read_bootstrap_caps(&state);
-    let heartbeat = std::time::Duration::from_millis(1500);
+    // SSE keep-alive 节奏 30s。codex 自己 idle_timeout 5 分钟（codex-rs/codex-api/src/
+    // sse/responses.rs:372 + model-provider-info DEFAULT_STREAM_IDLE_TIMEOUT_MS=300_000），
+    // 30s 心跳 = 5x 安全边界，比之前 1.5s 省 95% 心跳开销。
+    let heartbeat = std::time::Duration::from_secs(30);
     let mut current_upstream = initial_upstream;
     let mut attempts: usize = 0;
     let mut capacity_attempts: usize = 0;
@@ -2422,11 +2443,13 @@ fn build_stream_response_from_parts(
     } else {
         futures_util::stream::once(async move { Ok(prefix) }).boxed()
     };
-    // 给 rest 套一层 SSE keep-alive：上游每 1.5s 没新 chunk 就自动塞一行 SSE 注释
-    // (": keep-alive\n\n")，client 解析器忽略，但 TCP 连接和 codex 那头的读循环都不会超时
+    // 给 rest 套一层 SSE keep-alive：上游 30s 没新 chunk 就自动塞一行 SSE 注释
+    // (": keep-alive\n\n")，client 解析器忽略，但 TCP 连接和 codex 那头的读循环都不会超时。
+    // codex 自己的 idle_timeout 是 5 分钟（DEFAULT_STREAM_IDLE_TIMEOUT_MS=300_000），
+    // 30s 心跳给 5x 安全边界够。
     let rest_with_heartbeat = wrap_with_sse_heartbeat(
         rest,
-        std::time::Duration::from_millis(1500),
+        std::time::Duration::from_secs(30),
     );
     let raw_stream = prefix_stream.chain(rest_with_heartbeat);
 
