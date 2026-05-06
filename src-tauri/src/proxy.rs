@@ -1229,6 +1229,28 @@ async fn handle_request(
             .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "5xx 透传")));
     }
 
+    // 7.6 其他 4xx（400/404/422 等）：上游通常返 {"detail":"Bad Request"} 一类的 FastAPI
+    // 错误体。proxy 不切号、不重试，但把 path + body 前 1KB 写 log，方便排错。
+    if status_code.is_client_error()
+        && status_code != reqwest::StatusCode::UNAUTHORIZED
+        && status_code != reqwest::StatusCode::FORBIDDEN
+        && status_code != reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
+        let preview: String = String::from_utf8_lossy(&resp_bytes).chars().take(1024).collect();
+        println!(
+            "[Proxy] 上游 {} {} body: {}",
+            status_code.as_u16(),
+            upstream_url,
+            preview
+        );
+        return Ok(Response::builder()
+            .status(status_code.as_u16())
+            .header("content-type", "application/json")
+            .body(full_body(resp_bytes))
+            .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "4xx 透传失败")));
+    }
+
     // 8. 成功响应（200 + SSE）→ 立刻返回 Response，body 流内部跑 bootstrap+心跳+切号
     if status_code == reqwest::StatusCode::OK && is_sse_response(&upstream_resp) {
         let resp_status = upstream_resp.status();
