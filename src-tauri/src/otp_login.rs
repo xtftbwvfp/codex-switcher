@@ -75,9 +75,15 @@ pub async fn run_login(
     let auth_url = build_auth_url(&pkce.code_challenge, &state, &redirect_uri);
     let resp = client
         .get(&auth_url)
-        .header("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        .header(
+            "accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        )
         .header("accept-language", "en-US,en;q=0.9")
-        .header("sec-ch-ua", r#""Chromium";v="142", "Google Chrome";v="142", "Not?A_Brand";v="99""#)
+        .header(
+            "sec-ch-ua",
+            r#""Chromium";v="142", "Google Chrome";v="142", "Not?A_Brand";v="99""#,
+        )
         .header("sec-ch-ua-mobile", "?0")
         .header("sec-ch-ua-platform", "\"macOS\"")
         .header("sec-fetch-dest", "document")
@@ -107,7 +113,10 @@ pub async fn run_login(
 
     log_step("2. POST sentinel/req 拿 server token");
     let server_token = fetch_sentinel_token(&client, UA, &device_id, FLOW).await?;
-    println!("  → server_token (前 24 字符): {}…", &server_token.chars().take(24).collect::<String>());
+    println!(
+        "  → server_token (前 24 字符): {}…",
+        &server_token.chars().take(24).collect::<String>()
+    );
     let sentinel_header = make_sentinel_header(&server_token, &device_id, FLOW);
 
     log_step("3. POST /api/accounts/authorize/continue（提交邮箱）");
@@ -134,7 +143,10 @@ pub async fn run_login(
     println!("  → status: {status}");
     println!("  → body: {}", short(&body));
     if !status.is_success() {
-        return Err(format!("authorize/continue 非 200: {status} body={}", short(&body)));
+        return Err(format!(
+            "authorize/continue 非 200: {status} body={}",
+            short(&body)
+        ));
     }
     // 检查 page.type，应该是 email_otp_verification
     if let Ok(v) = serde_json::from_str::<Value>(&body) {
@@ -189,12 +201,23 @@ pub async fn run_login(
     println!("  → status: {status}");
     println!("  → body: {}", short(&body));
     if !status.is_success() {
-        return Err(format!("email-otp/validate 非 200: {status} body={}", short(&body)));
+        return Err(format!(
+            "email-otp/validate 非 200: {status} body={}",
+            short(&body)
+        ));
     }
     let v: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     let workspace_id = pluck_str(&v, &["workspace_id", "workspaceId", "default_workspace_id"]);
-    let mut continue_url =
-        pluck_str(&v, &["continue_url", "continueUrl", "next_url", "nextUrl", "redirect_url"]);
+    let mut continue_url = pluck_str(
+        &v,
+        &[
+            "continue_url",
+            "continueUrl",
+            "next_url",
+            "nextUrl",
+            "redirect_url",
+        ],
+    );
     println!("  → workspace_id: {:?}", workspace_id);
     println!("  → continue_url(otp): {:?}", continue_url);
 
@@ -238,10 +261,7 @@ pub async fn run_login(
                 }
             }
             if effective_wsid.is_none() {
-                for path in [
-                    "workspaces",
-                    "client_auth_session/workspaces",
-                ] {
+                for path in ["workspaces", "client_auth_session/workspaces"] {
                     let target = if path.contains('/') {
                         v.pointer(&format!("/{path}"))
                     } else {
@@ -344,12 +364,19 @@ fn generate_state() -> String {
 /// 从 oai-client-auth-session cookie 里挖 workspace_id。
 /// 该 cookie 是 JWT-like 三段，每段都是 base64url 编码 JSON，里面会有 workspaces[0].id。
 fn extract_workspace_from_session_cookie(jar: &reqwest::cookie::Jar) -> Option<String> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, engine::general_purpose::STANDARD as B64STD, Engine as _};
+    use base64::{
+        engine::general_purpose::STANDARD as B64STD,
+        engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
+    };
     use reqwest::cookie::CookieStore;
 
     let raw = {
         let mut found: Option<String> = None;
-        for url in ["https://auth.openai.com/", "https://chatgpt.com/", "https://openai.com/"] {
+        for url in [
+            "https://auth.openai.com/",
+            "https://chatgpt.com/",
+            "https://openai.com/",
+        ] {
             let u: reqwest::Url = url.parse().ok()?;
             if let Some(hv) = jar.cookies(&u) {
                 if let Ok(s) = hv.to_str() {
@@ -368,7 +395,10 @@ fn extract_workspace_from_session_cookie(jar: &reqwest::cookie::Jar) -> Option<S
         }
         found?
     };
-    println!("  → cookie raw 头 60: {}…", raw.chars().take(60).collect::<String>());
+    println!(
+        "  → cookie raw 头 60: {}…",
+        raw.chars().take(60).collect::<String>()
+    );
     for seg in raw.split('.') {
         if seg.is_empty() {
             continue;
@@ -520,11 +550,7 @@ fn pluck_str(v: &Value, keys: &[&str]) -> Option<String> {
         }
         // 再翻一层 data/result/payload
         for nk in ["data", "result", "next", "payload"] {
-            if let Some(s) = v
-                .get(nk)
-                .and_then(|x| x.get(k))
-                .and_then(|x| x.as_str())
-            {
+            if let Some(s) = v.get(nk).and_then(|x| x.get(k)).and_then(|x| x.as_str()) {
                 if !s.is_empty() {
                     return Some(s.to_string());
                 }

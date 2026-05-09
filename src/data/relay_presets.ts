@@ -26,6 +26,12 @@ export interface RelayPreset {
     model_fallback?: string | null;
     /** 模型映射表（key=客户端 model，value=中转站 model） */
     model_map?: Record<string, string> | null;
+    /**
+     * 上游协议 wire format：
+     * - "responses"（默认 / 不填 = 等价）—— 上游原生支持 codex /v1/responses（Unity2、ChatGPT 子集、OpenAI key）
+     * - "chat_completions" —— 上游只懂 /chat/completions（GLM Coding Plan / 通用 OpenAI Chat），proxy 翻译
+     */
+    relay_protocol?: 'responses' | 'chat_completions';
 }
 
 export const RELAY_PRESETS: RelayPreset[] = [
@@ -49,6 +55,26 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'glm-5.1-x',
         },
         description: 'GLM-5.1，OpenAI 兼容；模型自动映射 gpt-* → glm-*',
+    },
+    {
+        id: 'glm_coding',
+        name: 'GLM Coding Plan',
+        // GLM Coding 套餐专属端点（与普通 paas/v4 不同）；只暴露 /chat/completions
+        base_url: 'https://open.bigmodel.cn/api/coding/paas/v4',
+        homepage: 'https://docs.bigmodel.cn/cn/guide/start/coding-plan',
+        usage_preset: 'glm_zhipu',
+        relay_protocol: 'chat_completions',
+        model_fallback: 'glm-5.1',
+        model_map: {
+            'gpt-5.5': 'glm-5.1',
+            'gpt-5': 'glm-5.1',
+            'gpt-5-codex': 'glm-5.1',
+            'gpt-4o': 'glm-5',
+            'gpt-4o-mini': 'glm-5.1-x',
+            'o1': 'glm-5.1',
+            'o1-mini': 'glm-5.1-x',
+        },
+        description: 'GLM Coding Plan（codex /v1/responses ↔ /chat/completions 翻译，内置）',
     },
     {
         id: 'custom',

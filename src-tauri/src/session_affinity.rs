@@ -80,12 +80,7 @@ impl SessionAffinity {
     /// 记录一次"该 session 在该账号上确认拿到 cache 命中"（cached_tokens > 0）
     /// 这是 evidence-based stickiness 的核心：没看到证据就不记，避免把请求黏到一个根本没缓存
     /// 的号上。
-    pub fn record_cache_hit(
-        &self,
-        session_key: &str,
-        account_id: &str,
-        cached_tokens: i64,
-    ) {
+    pub fn record_cache_hit(&self, session_key: &str, account_id: &str, cached_tokens: i64) {
         if cached_tokens <= 0 {
             return;
         }
@@ -164,10 +159,7 @@ impl Default for SessionAffinity {
 ///   2. body.previous_response_id —— Responses API 链式上下文
 ///   3. headers.Session_id / X-Session-Id —— 部分 client 用
 ///   4. (model + 首段 input 文本前 256 字符的哈希) —— 兜底，对非链式请求也能聚到一起
-pub fn extract_session_key(
-    body: &[u8],
-    headers: &reqwest::header::HeaderMap,
-) -> Option<String> {
+pub fn extract_session_key(body: &[u8], headers: &reqwest::header::HeaderMap) -> Option<String> {
     // 4 路兜底，前 3 路要解 JSON
     let json: Option<serde_json::Value> = serde_json::from_slice(body).ok();
 

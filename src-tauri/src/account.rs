@@ -364,9 +364,20 @@ pub struct Account {
     /// 模型映射兜底：当 `relay_model_map` 不命中时统一替换成此值；None=透传。
     #[serde(default)]
     pub relay_model_fallback: Option<String>,
+
+    /// Relay 上游协议：
+    /// - `"responses"`（默认）—— 上游原生支持 codex `/v1/responses`（Unity2、ChatGPT、OpenAI key）
+    /// - `"chat_completions"` —— 上游只懂 `/chat/completions`（GLM Coding Plan、通用 OpenAI 兼容）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_protocol: Option<String>,
 }
 
 impl Account {
+    /// 取 `relay_protocol`，未设置时返回 `"responses"`。
+    pub fn relay_protocol_or_default(&self) -> &str {
+        self.relay_protocol.as_deref().unwrap_or("responses")
+    }
+
     /// 解析有效 kind：`Legacy` 时按 token 前缀派生
     pub fn effective_kind(&self) -> AccountKind {
         match self.kind {
@@ -684,6 +695,7 @@ impl AccountStore {
             relay_usage_cache: None,
             relay_model_map: None,
             relay_model_fallback: None,
+            relay_protocol: None,
         };
 
         self.accounts.insert(id.clone(), account.clone());
@@ -699,6 +711,7 @@ impl AccountStore {
     /// 添加中转站账号（Relay 类型）。
     ///
     /// 不同于 OAuth/官方 API key：sk- 永久有效、不可 refresh、上游打 base_url。
+    #[allow(clippy::too_many_arguments)]
     pub fn add_relay_account(
         &mut self,
         name: String,
@@ -709,6 +722,7 @@ impl AccountStore {
         notes: Option<String>,
         model_map: Option<std::collections::HashMap<String, String>>,
         model_fallback: Option<String>,
+        relay_protocol: Option<String>,
     ) -> Account {
         let id = uuid::Uuid::new_v4().to_string();
         let normalized_base = base_url.trim().trim_end_matches('/').to_string();
@@ -741,6 +755,7 @@ impl AccountStore {
             relay_usage_cache: None,
             relay_model_map: model_map,
             relay_model_fallback: model_fallback,
+            relay_protocol,
         };
 
         self.accounts.insert(id.clone(), account.clone());

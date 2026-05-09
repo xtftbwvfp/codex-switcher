@@ -538,6 +538,12 @@ struct RelayRoute {
     account_id: String,
     model_map: Option<std::collections::HashMap<String, String>>,
     model_fallback: Option<String>,
+    /// `"responses"`（默认 / 上游原生）或 `"chat_completions"`（GLM 走翻译）
+    protocol: String,
+    /// Relay 配的 API key（chat_completions 模式下用作上游 Authorization）
+    api_key: Option<String>,
+    /// Relay base_url，便于在 chat_completions 模式下重写为 `<base>/chat/completions`
+    base_url: Option<String>,
 }
 
 /// 取 store.current 的 Relay 路由信息（仅 Relay 类型；其它 None）。
@@ -552,6 +558,9 @@ fn current_relay_route(state: &ProxyState) -> Option<RelayRoute> {
         account_id: id,
         model_map: acc.relay_model_map.clone(),
         model_fallback: acc.relay_model_fallback.clone(),
+        protocol: acc.relay_protocol_or_default().to_string(),
+        api_key: AccountStore::extract_access_token(&acc.auth_json),
+        base_url: acc.relay_base_url.clone(),
     })
 }
 
@@ -943,6 +952,23 @@ async fn handle_request(
     } else {
         body_bytes
     };
+
+    // ── chat_completions Relay 翻译分支 ──
+    // Relay 上游只懂 /chat/completions（GLM Coding Plan 等）→ 用 relay_translate 把
+    // codex 的 /v1/responses 翻译成 chat 协议，调好上游再把响应（SSE 或 sync）反翻译回来。
+    if let Some(ref r) = relay_route {
+        if r.protocol == "chat_completions" {
+            return Ok(handle_chat_completions_relay(
+                state.clone(),
+                r.clone(),
+                method.clone(),
+                path_and_query.clone(),
+                req_headers.clone(),
+                body_bytes.clone(),
+            )
+            .await);
+        }
+    }
 
     // 提取 session_key：用于 affinity 路由 + cache hit 记账（client 模式 affinity 由 Server 处理）
     let session_key = crate::session_affinity::extract_session_key(&body_bytes, &req_headers);
@@ -3931,6 +3957,278 @@ async fn bridge_websockets<S1, S2>(
             println!("[Proxy] 账号已切换，断开 WebSocket 连接（Codex App 将自动重连）");
         },
     }
+}
+
+// ────────────────────────────────────────────────────────────────
+// chat_completions Relay 翻译路径
+// ────────────────────────────────────────────────────────────────
+
+/// 取 body 里的 `model` 字段（已经经过 model_map / fallback 重写）。
+fn extract_model_from_body(body: &Bytes) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "glm-5.1".to_string())
+}
+
+/// 把 base_url（如 `https://open.bigmodel.cn/api/coding/paas/v4`）拼成
+/// `<base>/chat/completions`。返回 (URL, host)。
+fn build_chat_completions_url(base_url: &str) -> Option<(String, String)> {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let host = url::Url::parse(trimmed)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))?;
+    Some((format!("{}/chat/completions", trimmed), host))
+}
+
+async fn handle_chat_completions_relay(
+    state: Arc<ProxyState>,
+    relay: RelayRoute,
+    method: hyper::Method,
+    path_and_query: String,
+    req_headers: hyper::HeaderMap,
+    body_bytes: Bytes,
+) -> Response<ProxyBody> {
+    let path_lc = path_and_query.split('?').next().unwrap_or("").to_string();
+
+    // GET /v1/models → 本地合成最小响应，不打上游
+    if method == hyper::Method::GET && (path_lc == "/v1/models" || path_lc.ends_with("/models")) {
+        let default_model = relay
+            .model_fallback
+            .clone()
+            .unwrap_or_else(|| "glm-5.1".to_string());
+        let body = crate::relay_translate::synthetic_models_response(&default_model);
+        return Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(full_body(Bytes::from(body)))
+            .unwrap_or_else(|_| {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "models 响应构建失败")
+            });
+    }
+
+    // 仅翻译 /v1/responses；其它 path 透传到 base_url + path（保留历史行为）。
+    let is_responses_call = path_lc == "/v1/responses" || path_lc.ends_with("/responses");
+    let base = match relay.base_url.as_deref() {
+        Some(b) if !b.is_empty() => b,
+        _ => return error_response(StatusCode::SERVICE_UNAVAILABLE, "Relay base_url 未配置"),
+    };
+
+    if !is_responses_call {
+        // 透传：直接打 base + path（不翻译）
+        let trimmed = base.trim_end_matches('/');
+        let upstream_url = format!("{}{}", trimmed, path_and_query);
+        let host = match url::Url::parse(trimmed)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+        {
+            Some(h) => h,
+            None => return error_response(StatusCode::BAD_GATEWAY, "Relay base_url 无法解析 host"),
+        };
+        let base_headers = build_upstream_headers(&req_headers, &host);
+        let token = relay.api_key.clone().unwrap_or_default();
+        match forward_with_token(
+            &state,
+            &method,
+            &upstream_url,
+            &base_headers,
+            &body_bytes,
+            &token,
+        )
+        .await
+        {
+            Ok(resp) => return build_stream_response(resp, Some(state.tracker.clone()), None),
+            Err(e) => {
+                return error_response(StatusCode::BAD_GATEWAY, &format!("上游连接失败: {}", e))
+            }
+        }
+    }
+
+    // 翻译请求体
+    let model = extract_model_from_body(&body_bytes);
+    let (chat_body, mut translator_state) =
+        match crate::relay_translate::translate_request(&body_bytes, &model) {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("[Proxy] relay translate 请求失败: {}", e);
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("translator 请求处理失败: {}", e),
+                );
+            }
+        };
+
+    let (upstream_url, upstream_host) = match build_chat_completions_url(base) {
+        Some(x) => x,
+        None => return error_response(StatusCode::BAD_GATEWAY, "Relay base_url 解析失败"),
+    };
+
+    // 透传必要 header（剔除 Authorization/Host），强制注入 Relay api_key
+    let mut headers = build_upstream_headers(&req_headers, &upstream_host);
+    let api_key = relay.api_key.clone().unwrap_or_default();
+    if !api_key.is_empty() {
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key)) {
+            headers.insert(reqwest::header::AUTHORIZATION, v);
+        }
+    }
+    // chat/completions 上游永远要 application/json
+    if let Ok(ct) = reqwest::header::HeaderValue::from_str("application/json") {
+        headers.insert(reqwest::header::CONTENT_TYPE, ct);
+    }
+    headers.remove(reqwest::header::CONTENT_LENGTH);
+
+    let body_bytes_chat = Bytes::from(chat_body);
+    println!(
+        "[Proxy] → relay translate (chat_completions): {} {} (model={}, stream={})",
+        method, upstream_url, translator_state.model, translator_state.stream_requested
+    );
+
+    let upstream_resp = match state
+        .client
+        .request(
+            reqwest::Method::from_bytes(method.as_str().as_bytes())
+                .unwrap_or(reqwest::Method::POST),
+            &upstream_url,
+        )
+        .headers(headers)
+        .body(body_bytes_chat.to_vec())
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("relay 上游连接失败: {}", e),
+            )
+        }
+    };
+
+    let status = upstream_resp.status();
+    if status != reqwest::StatusCode::OK {
+        // 错误体直接透回去（codex CLI 看到上游错误更易排错）
+        let bytes = upstream_resp.bytes().await.unwrap_or_default();
+        let preview: String = String::from_utf8_lossy(&bytes).chars().take(512).collect();
+        eprintln!(
+            "[Proxy] relay 上游 {} {} body: {}",
+            status.as_u16(),
+            upstream_url,
+            preview
+        );
+        return Response::builder()
+            .status(status.as_u16())
+            .header("content-type", "application/json")
+            .body(full_body(bytes))
+            .unwrap_or_else(|_| error_response(StatusCode::BAD_GATEWAY, "上游响应构建失败"));
+    }
+
+    let is_sse = is_sse_response(&upstream_resp);
+    if !is_sse {
+        // sync /chat/completions 响应 → 翻译成 Responses-shape JSON
+        let bytes = upstream_resp.bytes().await.unwrap_or_default();
+        match crate::relay_translate::translate_sync_response(&translator_state, &bytes) {
+            Ok(out) => {
+                return Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(full_body(Bytes::from(out)))
+                    .unwrap_or_else(|_| {
+                        error_response(StatusCode::INTERNAL_SERVER_ERROR, "sync 响应构建失败")
+                    });
+            }
+            Err(e) => {
+                eprintln!("[Proxy] relay sync 翻译失败: {}", e);
+                // 翻译失败 → 透传原 chat 响应（codex 端可能不认识，但起码有信号）
+                return Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(full_body(bytes))
+                    .unwrap_or_else(|_| {
+                        error_response(StatusCode::INTERNAL_SERVER_ERROR, "sync 透传失败")
+                    });
+            }
+        }
+    }
+
+    // SSE → 启 task 边读边翻译，channel 推到下游
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    let mut upstream_stream = upstream_resp.bytes_stream();
+
+    // 先发 response.created
+    let _ = tx
+        .send(Bytes::from(crate::relay_translate::emit_created(
+            &translator_state,
+        )))
+        .await;
+
+    tokio::spawn(async move {
+        let mut buf = crate::relay_translate::ChatSseBuffer::new();
+        let mut saw_done = false;
+        while !saw_done {
+            let next = upstream_stream.next().await;
+            match next {
+                Some(Ok(chunk)) => {
+                    buf.push(&chunk);
+                    let evts = buf.drain_events();
+                    for e in evts {
+                        match e {
+                            crate::relay_translate::ChatSseEvent::Done => {
+                                saw_done = true;
+                                break;
+                            }
+                            crate::relay_translate::ChatSseEvent::Data(payload) => {
+                                let translated = crate::relay_translate::handle_chunk(
+                                    &mut translator_state,
+                                    &payload,
+                                );
+                                for tev in translated {
+                                    if tx.send(Bytes::from(tev)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(Err(e)) => {
+                    eprintln!("[Proxy] relay SSE 上游错误: {}", e);
+                    break;
+                }
+                None => break,
+            }
+        }
+        let done = crate::relay_translate::emit_completed(&mut translator_state);
+        let _ = tx.send(Bytes::from(done)).await;
+    });
+
+    let body_stream: ByteStream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv()
+            .await
+            .map(|item| (Ok::<Bytes, reqwest::Error>(item), rx))
+    })
+    .boxed();
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    headers.insert(
+        reqwest::header::CACHE_CONTROL,
+        reqwest::header::HeaderValue::from_static("no-cache"),
+    );
+
+    build_stream_response_from_parts(
+        reqwest::StatusCode::OK,
+        headers,
+        Bytes::new(),
+        body_stream,
+        Some(state.tracker.clone()),
+        None,
+    )
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {

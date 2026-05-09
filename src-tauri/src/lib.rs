@@ -12,6 +12,7 @@ mod oauth_server;
 pub mod otp_login;
 mod proxy;
 mod refresh_lock;
+pub mod relay_translate;
 mod remote_client;
 mod remote_server;
 mod scheduler;
@@ -664,6 +665,7 @@ fn bulk_import_accounts(
 /// `base_url` 必须是 `http(s)://` 完整 URL；保存时尾斜杠会被去除。
 /// `usage_preset` 命中内置 fetcher 名（如 `"openai_compat"`），None=不拉 usage。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn add_relay_account(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
@@ -675,6 +677,7 @@ async fn add_relay_account(
     notes: Option<String>,
     model_map: Option<std::collections::HashMap<String, String>>,
     model_fallback: Option<String>,
+    relay_protocol: Option<String>,
 ) -> Result<Account, String> {
     let trimmed_url = base_url.trim();
     if !(trimmed_url.starts_with("https://") || trimmed_url.starts_with("http://")) {
@@ -704,6 +707,9 @@ async fn add_relay_account(
             model_fallback
                 .map(|f| f.trim().to_string())
                 .filter(|f| !f.is_empty()),
+            relay_protocol
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
         );
         store.save()?;
         let push = account::pushes_to_server(&store.settings.remote_mode);
@@ -738,13 +744,14 @@ async fn add_relay_account(
     Ok(account)
 }
 
-/// 更新 Relay 账号的模型映射 / 兜底（编辑功能用）。
+/// 更新 Relay 账号的模型映射 / 兜底 / 上游协议（编辑功能用）。
 #[tauri::command]
 fn update_relay_model_map(
     state: State<AppState>,
     id: String,
     model_map: Option<std::collections::HashMap<String, String>>,
     model_fallback: Option<String>,
+    relay_protocol: Option<String>,
 ) -> Result<(), String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     let acc = store
@@ -758,6 +765,14 @@ fn update_relay_model_map(
     acc.relay_model_fallback = model_fallback
         .map(|f| f.trim().to_string())
         .filter(|f| !f.is_empty());
+    if let Some(p) = relay_protocol {
+        let trimmed = p.trim().to_string();
+        if trimmed.is_empty() || trimmed == "responses" {
+            acc.relay_protocol = None;
+        } else {
+            acc.relay_protocol = Some(trimmed);
+        }
+    }
     store.save()?;
     Ok(())
 }
@@ -3982,6 +3997,7 @@ mod tests {
             relay_usage_cache: None,
             relay_model_map: None,
             relay_model_fallback: None,
+            relay_protocol: None,
         }
     }
 

@@ -21,8 +21,7 @@ use serde_json::{json, Value};
 pub const SENTINEL_REQ_URL: &str = "https://sentinel.openai.com/backend-api/sentinel/req";
 pub const SENTINEL_FRAME_REFERER: &str =
     "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6";
-pub const SENTINEL_SDK_SCRIPT: &str =
-    "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js";
+pub const SENTINEL_SDK_SCRIPT: &str = "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js";
 
 /// 构造一个 19 元素 config 数组（仿浏览器环境）。
 fn build_config(user_agent: &str) -> Vec<Value> {
@@ -63,8 +62,21 @@ fn build_config(user_agent: &str) -> Vec<Value> {
     let nav_prop = nav_props[r.random_range(0..nav_props.len())];
     let nav_val = format!("{nav_prop}\u{2212}undefined");
 
-    let doc_keys = ["location", "implementation", "URL", "documentURI", "compatMode"];
-    let win_keys = ["Object", "Function", "Array", "Number", "parseFloat", "undefined"];
+    let doc_keys = [
+        "location",
+        "implementation",
+        "URL",
+        "documentURI",
+        "compatMode",
+    ];
+    let win_keys = [
+        "Object",
+        "Function",
+        "Array",
+        "Number",
+        "parseFloat",
+        "undefined",
+    ];
     let cores = [4i64, 8, 12, 16];
     let hardware_concurrency = cores[r.random_range(0..cores.len())];
     let sid = uuid::Uuid::new_v4().to_string();
@@ -130,14 +142,22 @@ pub async fn fetch_sentinel_token(
         .await
         .map_err(|e| format!("sentinel/req 读取响应失败: {e}"))?;
     if !status.is_success() {
-        return Err(format!("sentinel/req 返回 {status}: {}", &text[..text.len().min(200)]));
+        return Err(format!(
+            "sentinel/req 返回 {status}: {}",
+            &text[..text.len().min(200)]
+        ));
     }
     let v: Value =
         serde_json::from_str(&text).map_err(|e| format!("sentinel/req JSON 解析失败: {e}"))?;
     v.get("token")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| format!("sentinel/req 响应缺 token: {}", &text[..text.len().min(200)]))
+        .ok_or_else(|| {
+            format!(
+                "sentinel/req 响应缺 token: {}",
+                &text[..text.len().min(200)]
+            )
+        })
 }
 
 /// 拼接 openai-sentinel-token 头部值。

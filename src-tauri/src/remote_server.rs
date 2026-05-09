@@ -391,46 +391,41 @@ async fn handle_upsert(state: &ApiState, req: Request<Incoming>) -> Response<Res
         None // 跳过下面的 fetch_usage_direct 分支
     } else {
         match access_token_opt {
-        Some(t) => Some(t),
-        None => {
-            if let Some(ref rt) = refresh_token {
-                match crate::oauth::refresh_access_token(rt).await {
-                    Ok(tok) => {
-                        if let Ok(mut s) = state.store.lock() {
-                            if let Some(acc) = s.accounts.get_mut(&id) {
-                                AccountStore::apply_refreshed_tokens(
-                                    acc,
-                                    tok.access_token.clone(),
-                                    tok.refresh_token.clone(),
-                                    tok.id_token,
-                                    tok.expires_in,
-                                );
-                                let _ = s.save();
+            Some(t) => Some(t),
+            None => {
+                if let Some(ref rt) = refresh_token {
+                    match crate::oauth::refresh_access_token(rt).await {
+                        Ok(tok) => {
+                            if let Ok(mut s) = state.store.lock() {
+                                if let Some(acc) = s.accounts.get_mut(&id) {
+                                    AccountStore::apply_refreshed_tokens(
+                                        acc,
+                                        tok.access_token.clone(),
+                                        tok.refresh_token.clone(),
+                                        tok.id_token,
+                                        tok.expires_in,
+                                    );
+                                    let _ = s.save();
+                                }
                             }
+                            Some(tok.access_token)
                         }
-                        Some(tok.access_token)
+                        Err(e) => {
+                            quota_error = Some(format!("刷新 token 失败: {}", e));
+                            None
+                        }
                     }
-                    Err(e) => {
-                        quota_error = Some(format!("刷新 token 失败: {}", e));
-                        None
-                    }
+                } else {
+                    quota_error = Some("无 access_token 且无 refresh_token".to_string());
+                    None
                 }
-            } else {
-                quota_error = Some("无 access_token 且无 refresh_token".to_string());
-                None
             }
-        }
         }
     };
 
     if let Some(at) = access_token {
-        match crate::usage::UsageFetcher::fetch_usage_direct(
-            at,
-            account_id,
-            refresh_token,
-            true,
-        )
-        .await
+        match crate::usage::UsageFetcher::fetch_usage_direct(at, account_id, refresh_token, true)
+            .await
         {
             Ok((usage, _)) => {
                 if let Ok(mut s) = state.store.lock() {
@@ -540,10 +535,7 @@ async fn handle_refresh_account(state: &ApiState, id: &str) -> Response<Response
                 a.is_relay(),
             ),
             None => {
-                return json_resp(
-                    StatusCode::NOT_FOUND,
-                    json!({"error": "account not found"}),
-                );
+                return json_resp(StatusCode::NOT_FOUND, json!({"error": "account not found"}));
             }
         }
     };
@@ -861,10 +853,7 @@ async fn handle_solo_heartbeat(req: Request<Incoming>) -> Response<ResponseBody>
         .clamp(30, 3600);
     let until = chrono::Utc::now().timestamp() + ttl;
     active_solo_until().store(until, Ordering::Relaxed);
-    json_resp(
-        StatusCode::OK,
-        json!({"ok": true, "active_until": until}),
-    )
+    json_resp(StatusCode::OK, json!({"ok": true, "active_until": until}))
 }
 
 #[derive(Deserialize)]
@@ -901,10 +890,7 @@ async fn handle_solo_current(
             Err(e) => return err_resp(format!("锁获取失败: {}", e)),
         };
         if !store.accounts.contains_key(&new_id) {
-            return json_resp(
-                StatusCode::NOT_FOUND,
-                json!({"error": "account not found"}),
-            );
+            return json_resp(StatusCode::NOT_FOUND, json!({"error": "account not found"}));
         }
         let from = store
             .current
@@ -959,9 +945,7 @@ async fn handle_upload_skill(req: Request<Incoming>, query: &str) -> Response<Re
     let name = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("name="))
-        .map(|v| {
-            percent_decode(v)
-        })
+        .map(|v| percent_decode(v))
         .unwrap_or_default();
     if name.is_empty() {
         return json_resp(
@@ -988,9 +972,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(a), Some(b)) =
-                (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
-            {
+            if let (Some(a), Some(b)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
                 out.push(a * 16 + b);
                 i += 3;
                 continue;

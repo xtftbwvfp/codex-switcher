@@ -188,10 +188,7 @@ fn extract_oauth_code_from_request(request: &str, expected_state: &str) -> Optio
 /// - query 串:  `?code=XXX&state=YYY` 或 `code=XXX&state=YYY`
 /// - 裸 code（不推荐，不做 state 校验）
 #[tauri::command]
-pub async fn submit_oauth_callback(
-    app_handle: AppHandle,
-    input: String,
-) -> Result<(), String> {
+pub async fn submit_oauth_callback(app_handle: AppHandle, input: String) -> Result<(), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("回调链接不能为空".to_string());
@@ -207,7 +204,9 @@ pub async fn submit_oauth_callback(
     // 有 state 就校验；没 state 的裸 code 也接受（用户自己承担风险）
     if let Some(ref provided_state) = state_opt {
         let expected = {
-            let guard = get_pending_login().lock().map_err(|_| "登录流程状态锁异常")?;
+            let guard = get_pending_login()
+                .lock()
+                .map_err(|_| "登录流程状态锁异常")?;
             guard.as_ref().map(|p| p.state.clone())
         };
         match expected {
@@ -248,8 +247,7 @@ fn parse_callback_input(input: &str) -> (Option<String>, Option<String>) {
     if stripped.contains('=') {
         let fake = format!("http://x/?{}", stripped);
         if let Ok(url) = Url::parse(&fake) {
-            let params: std::collections::HashMap<_, _> =
-                url.query_pairs().into_owned().collect();
+            let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
             if let Some(code) = params.get("code") {
                 return (Some(code.clone()), params.get("state").cloned());
             }
