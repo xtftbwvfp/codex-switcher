@@ -10,13 +10,12 @@ pub mod mailbox;
 pub mod oauth;
 mod oauth_server;
 pub mod otp_login;
-pub mod output_compress;
-pub mod sentinel;
 mod proxy;
 mod refresh_lock;
 mod remote_client;
 mod remote_server;
 mod scheduler;
+pub mod sentinel;
 mod session_affinity;
 mod skills;
 mod switch_log;
@@ -27,66 +26,12 @@ mod usage;
 use account::{Account, AccountStore};
 use chrono::Utc;
 use refresh_lock::RefreshLockManager;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::process::Command;
 use tauri::{Emitter, Manager, State};
 use usage::{UsageDisplay, UsageFetcher};
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 
 const QUARANTINE_FIX_TICKET_TTL_SECS: i64 = 120;
-
-// ─── 全局：shell tool 输出压缩统计 ─────────────────────────────────
-// 跨请求累计，UI 可通过 get_compression_stats / reset_compression_stats 拉取/清零
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-pub struct CompressStats {
-    pub frames_seen: u64,
-    pub frames_compressed: u64,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
-}
-
-static COMPRESS_STATS: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<CompressStats>>> =
-    std::sync::OnceLock::new();
-
-pub fn compress_stats() -> std::sync::Arc<std::sync::Mutex<CompressStats>> {
-    COMPRESS_STATS
-        .get_or_init(|| std::sync::Arc::new(std::sync::Mutex::new(CompressStats::default())))
-        .clone()
-}
-
-/// 给 proxy 调用：每次看到一个 shell tool 输出帧（无论是否真截断）就更新统计。
-pub fn record_compress_frame(was_compressed: bool, bytes_in: u64, bytes_out: u64) {
-    let stats = compress_stats();
-    let mut guard = match stats.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    guard.frames_seen += 1;
-    if was_compressed {
-        guard.frames_compressed += 1;
-    }
-    guard.bytes_in = guard.bytes_in.saturating_add(bytes_in);
-    guard.bytes_out = guard.bytes_out.saturating_add(bytes_out);
-}
-
-#[tauri::command]
-fn get_compression_stats() -> CompressStats {
-    let stats = compress_stats();
-    let guard = match stats.lock() {
-        Ok(g) => g,
-        Err(_) => return CompressStats::default(),
-    };
-    guard.clone()
-}
-
-#[tauri::command]
-fn reset_compression_stats() {
-    let stats = compress_stats();
-    let mut guard = match stats.lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    *guard = CompressStats::default();
-}
 
 #[derive(Clone, Debug)]
 struct QuarantineFixTicket {
@@ -442,7 +387,10 @@ fn update_settings(
 
     // solo 心跳循环生命周期：remote_mode 进/出 "solo" 时启停
     {
-        let mut slot = state.solo_heartbeat_handle.lock().map_err(|e| e.to_string())?;
+        let mut slot = state
+            .solo_heartbeat_handle
+            .lock()
+            .map_err(|e| e.to_string())?;
         let was_solo = prev_remote_mode == "solo";
         let is_solo = settings.remote_mode == "solo";
         match (was_solo, is_solo) {
@@ -645,11 +593,8 @@ fn bulk_import_accounts(
     };
     {
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let existing_emails: std::collections::HashSet<String> = store
-            .accounts
-            .values()
-            .map(|a| a.name.clone())
-            .collect();
+        let existing_emails: std::collections::HashSet<String> =
+            store.accounts.values().map(|a| a.name.clone()).collect();
         for p in &all_parsed {
             if existing_emails.contains(&p.email) {
                 continue;
@@ -669,17 +614,19 @@ fn bulk_import_accounts(
 
     // client / solo 模式：把新导入的账号推到 Server，让 Server 接管刷新 + 配额查询
     // 否则后续 UI 刷新会调 remote_refresh_account_quota → Server 找不到账号
-    if account::pushes_to_server(&remote_mode) && !secret.is_empty() && !newly_added_ids.is_empty() {
+    if account::pushes_to_server(&remote_mode) && !secret.is_empty() && !newly_added_ids.is_empty()
+    {
         let store_arc = state.store.clone();
         let app_clone = app.clone();
         tauri::async_runtime::spawn(async move {
-            let base = match remote_client::resolve_base_url(&server_url, &server_url_fallback).await {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("[BulkImport] Server 不可达，跳过 push: {}", e);
-                    return;
-                }
-            };
+            let base =
+                match remote_client::resolve_base_url(&server_url, &server_url_fallback).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[BulkImport] Server 不可达，跳过 push: {}", e);
+                        return;
+                    }
+                };
             let mut pushed = 0;
             for id in newly_added_ids {
                 let account_clone = {
@@ -746,11 +693,17 @@ async fn add_relay_account(
             name.trim().to_string(),
             trimmed_url.to_string(),
             api_key.trim().to_string(),
-            homepage.map(|h| h.trim().to_string()).filter(|h| !h.is_empty()),
-            usage_preset.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+            homepage
+                .map(|h| h.trim().to_string())
+                .filter(|h| !h.is_empty()),
+            usage_preset
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty()),
             notes,
             model_map,
-            model_fallback.map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
+            model_fallback
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty()),
         );
         store.save()?;
         let push = account::pushes_to_server(&store.settings.remote_mode);
@@ -773,10 +726,7 @@ async fn add_relay_account(
                             "[Relay] upsert to server: id={} status={}",
                             outcome.id, outcome.upserted
                         ),
-                        Err(e) => eprintln!(
-                            "[Relay] 推送 Server 失败（账号已本地保存）: {}",
-                            e
-                        ),
+                        Err(e) => eprintln!("[Relay] 推送 Server 失败（账号已本地保存）: {}", e),
                     }
                 }
             }
@@ -827,8 +777,8 @@ async fn refresh_relay_usage(
             return Err("不是中转站账号".into());
         }
         let base = acc.relay_base_url.clone().ok_or("中转站账号缺 base_url")?;
-        let key = AccountStore::extract_access_token(&acc.auth_json)
-            .ok_or("中转站账号缺 api_key")?;
+        let key =
+            AccountStore::extract_access_token(&acc.auth_json).ok_or("中转站账号缺 api_key")?;
         let preset = acc.relay_usage_preset.clone();
         (base, key, preset)
     };
@@ -837,9 +787,7 @@ async fn refresh_relay_usage(
         Some("openai_compat") | None => {
             UsageFetcher::fetch_relay_usage_openai_compat(&base_url, &api_key).await?
         }
-        Some("glm_zhipu") => {
-            UsageFetcher::fetch_relay_usage_glm_zhipu(&base_url, &api_key).await?
-        }
+        Some("glm_zhipu") => UsageFetcher::fetch_relay_usage_glm_zhipu(&base_url, &api_key).await?,
         Some(other) => return Err(format!("未支持的 usage_preset: {}", other)),
     };
 
@@ -992,7 +940,13 @@ async fn finalize_oauth_login(
     code: String,
 ) -> Result<Account, String> {
     let token_res = oauth_server::complete_oauth_login(code).await?;
-    save_token_as_account(&state, &app, token_res, Some("OpenAI OAuth 登录".to_string())).await
+    save_token_as_account(
+        &state,
+        &app,
+        token_res,
+        Some("OpenAI OAuth 登录".to_string()),
+    )
+    .await
 }
 
 // ============================================================================
@@ -1354,38 +1308,43 @@ async fn switch_account(
     if is_target_relay {
         println!("[Switch] Relay 类型，跳过 OpenAI usage 预检: {}", target_id);
     } else {
-    println!(
-        "[Switch] 预检目标账号配额（不触发本地 refresh）: {}",
-        target_id
-    );
-    match usage::UsageFetcher::fetch_usage_direct(access_token, account_id, refresh_token, false)
+        println!(
+            "[Switch] 预检目标账号配额（不触发本地 refresh）: {}",
+            target_id
+        );
+        match usage::UsageFetcher::fetch_usage_direct(
+            access_token,
+            account_id,
+            refresh_token,
+            false,
+        )
         .await
-    {
-        Ok((usage, _)) => {
-            let mut store = state.store.lock().map_err(|e| e.to_string())?;
-            if let Some(account) = store.accounts.get_mut(&target_id) {
-                account.cached_quota = Some(account::CachedQuota {
-                    five_hour_left: usage.five_hour_left as f64,
-                    five_hour_reset: usage.five_hour_reset.clone(),
-                    five_hour_reset_at: usage.five_hour_reset_at,
-                    five_hour_label: usage.five_hour_label.clone(),
-                    weekly_left: usage.weekly_left as f64,
-                    weekly_reset: usage.weekly_reset.clone(),
-                    weekly_reset_at: usage.weekly_reset_at,
-                    weekly_label: usage.weekly_label.clone(),
-                    plan_type: usage.plan_type.clone(),
-                    is_valid_for_cli: usage.is_valid_for_cli,
-                    updated_at: chrono::Utc::now(),
-                });
-                if let Err(e) = store.save() {
-                    eprintln!("[Store] 保存失败: {}", e);
+        {
+            Ok((usage, _)) => {
+                let mut store = state.store.lock().map_err(|e| e.to_string())?;
+                if let Some(account) = store.accounts.get_mut(&target_id) {
+                    account.cached_quota = Some(account::CachedQuota {
+                        five_hour_left: usage.five_hour_left as f64,
+                        five_hour_reset: usage.five_hour_reset.clone(),
+                        five_hour_reset_at: usage.five_hour_reset_at,
+                        five_hour_label: usage.five_hour_label.clone(),
+                        weekly_left: usage.weekly_left as f64,
+                        weekly_reset: usage.weekly_reset.clone(),
+                        weekly_reset_at: usage.weekly_reset_at,
+                        weekly_label: usage.weekly_label.clone(),
+                        plan_type: usage.plan_type.clone(),
+                        is_valid_for_cli: usage.is_valid_for_cli,
+                        updated_at: chrono::Utc::now(),
+                    });
+                    if let Err(e) = store.save() {
+                        eprintln!("[Store] 保存失败: {}", e);
+                    }
                 }
             }
+            Err(e) => {
+                println!("[Switch] 预检配额失败（忽略，不阻断切换）: {}", e);
+            }
         }
-        Err(e) => {
-            println!("[Switch] 预检配额失败（忽略，不阻断切换）: {}", e);
-        }
-    }
     } // end if !is_target_relay
 
     // 3. 执行切换：根据 switch_mode + 代理运行状态决定热/冷切
@@ -1645,9 +1604,7 @@ async fn solo_try_align_current(
 /// 同时顺带做"store/disk 不一致"的自愈：磁盘上的 sub 和 store.current 的 sub 不匹配时，
 /// 用 Server 拉到的覆写。
 /// 仅在 client 模式 + 配置了 secret 时生效。返回 true 表示真的写盘了，false 表示跳过/失败。
-pub async fn do_one_fast_auth_sync(
-    store: &std::sync::Arc<std::sync::Mutex<AccountStore>>,
-) -> bool {
+pub async fn do_one_fast_auth_sync(store: &std::sync::Arc<std::sync::Mutex<AccountStore>>) -> bool {
     let (mode, primary, fallback, secret, current_id) = {
         let s = match store.lock() {
             Ok(g) => g,
@@ -1687,7 +1644,9 @@ pub async fn do_one_fast_auth_sync(
         },
         Err(_) => local_cid.clone(),
     };
-    let Some(cid) = target_cid else { return false; };
+    let Some(cid) = target_cid else {
+        return false;
+    };
 
     // 2) 拉 cid 的最新 token 写盘
     match remote_client::fetch_token(&base, &secret, &cid).await {
@@ -2167,7 +2126,10 @@ pub async fn switch_to_next_account_internal(
             .and_then(|s| s.accounts.get(target_id).map(|a| a.is_relay()))
             .unwrap_or(false);
         if is_relay {
-            println!("[SmartSwitch] Relay 类型，跳过 quota 检查直接切换: {}", target_name);
+            println!(
+                "[SmartSwitch] Relay 类型，跳过 quota 检查直接切换: {}",
+                target_name
+            );
             return switch_account(state, app.clone(), target_id.clone()).await;
         }
 
@@ -2222,7 +2184,8 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
         if let Some(acc) = store.accounts.get(&id) {
             if acc.is_relay() {
                 return Err(
-                    "RELAY_ACCOUNT:中转站账号不支持 OpenAI usage 查询，请用「中转站余额刷新」".to_string()
+                    "RELAY_ACCOUNT:中转站账号不支持 OpenAI usage 查询，请用「中转站余额刷新」"
+                        .to_string(),
                 );
             }
         }
@@ -2387,7 +2350,7 @@ async fn get_quota_by_id(
         if let Some(acc) = store.accounts.get(&id) {
             if acc.is_relay() {
                 return Err(
-                    "RELAY_ACCOUNT:中转站账号请用「中转站余额刷新」，不是 OpenAI usage".to_string()
+                    "RELAY_ACCOUNT:中转站账号请用「中转站余额刷新」，不是 OpenAI usage".to_string(),
                 );
             }
         }
@@ -2692,10 +2655,19 @@ fn get_skill_repos() -> Result<Vec<skills::SkillRepo>, String> {
 #[tauri::command]
 fn add_skill_repo(owner: String, name: String, branch: String) -> Result<(), String> {
     let mut data = skills::SkillStore::load();
-    if data.repos.iter().any(|r| r.owner == owner && r.name == name) {
+    if data
+        .repos
+        .iter()
+        .any(|r| r.owner == owner && r.name == name)
+    {
         return Err("仓库已存在".into());
     }
-    data.repos.push(skills::SkillRepo { owner, name, branch, enabled: true });
+    data.repos.push(skills::SkillRepo {
+        owner,
+        name,
+        branch,
+        enabled: true,
+    });
     skills::SkillStore::save(&data)
 }
 
@@ -2711,7 +2683,8 @@ async fn discover_skills() -> Result<Vec<skills::DiscoverableSkill>, String> {
     let data = skills::SkillStore::load();
     let mut discovered = skills::SkillStore::discover_skills(&data.repos).await;
     // 标记已安装的
-    let installed_dirs: std::collections::HashSet<String> = data.skills.iter().map(|s| s.directory.clone()).collect();
+    let installed_dirs: std::collections::HashSet<String> =
+        data.skills.iter().map(|s| s.directory.clone()).collect();
     for s in &mut discovered {
         s.installed = installed_dirs.contains(&s.directory);
     }
@@ -2720,7 +2693,8 @@ async fn discover_skills() -> Result<Vec<skills::DiscoverableSkill>, String> {
 
 #[tauri::command]
 async fn install_skill(skill_json: String) -> Result<(), String> {
-    let skill: skills::DiscoverableSkill = serde_json::from_str(&skill_json).map_err(|e| e.to_string())?;
+    let skill: skills::DiscoverableSkill =
+        serde_json::from_str(&skill_json).map_err(|e| e.to_string())?;
     let mut data = skills::SkillStore::load();
     skills::SkillStore::install_skill(&mut data, &skill).await?;
     skills::SkillStore::save(&data)
@@ -2745,7 +2719,11 @@ fn get_skill_app_status() -> Result<std::collections::HashMap<String, bool>, Str
 
 #[tauri::command]
 fn get_skill_content(directory: String) -> Result<String, String> {
-    let ssot = dirs::home_dir().unwrap().join(".codex-switcher").join("skills").join(&directory);
+    let ssot = dirs::home_dir()
+        .unwrap()
+        .join(".codex-switcher")
+        .join("skills")
+        .join(&directory);
     let md_path = ssot.join("SKILL.md");
     std::fs::read_to_string(&md_path).map_err(|e| format!("读取失败: {}", e))
 }
@@ -3001,7 +2979,8 @@ fn set_codex_features_goals(enable: bool) -> Result<String, String> {
         .join("config.toml");
 
     let content = if config_path.exists() {
-        std::fs::read_to_string(&config_path).map_err(|e| format!("读取 config.toml 失败: {}", e))?
+        std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("读取 config.toml 失败: {}", e))?
     } else {
         String::new()
     };
@@ -3020,7 +2999,11 @@ fn set_codex_features_goals(enable: bool) -> Result<String, String> {
             }
         }
         // 在 [features] section 里匹配 goals = ... 行
-        if in_features && trimmed.starts_with("goals") && trimmed.contains('=') && !trimmed.starts_with('[') {
+        if in_features
+            && trimmed.starts_with("goals")
+            && trimmed.contains('=')
+            && !trimmed.starts_with('[')
+        {
             goals_seen = true;
             if enable {
                 new_lines.push("goals = true".to_string());
@@ -3259,7 +3242,9 @@ fn client_settings_snapshot_raw(
     state: &State<AppState>,
 ) -> Result<(String, String, String), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    if store.settings.remote_server_url.is_empty() && store.settings.remote_server_url_fallback.is_empty() {
+    if store.settings.remote_server_url.is_empty()
+        && store.settings.remote_server_url_fallback.is_empty()
+    {
         return Err("未配置 Server 地址".to_string());
     }
     if store.settings.remote_shared_secret.is_empty() {
@@ -3273,9 +3258,7 @@ fn client_settings_snapshot_raw(
 }
 
 /// 解析出当前可用 URL（primary → fallback），返回 (url, secret)
-async fn client_settings_snapshot(
-    state: &State<'_, AppState>,
-) -> Result<(String, String), String> {
+async fn client_settings_snapshot(state: &State<'_, AppState>) -> Result<(String, String), String> {
     let (primary, fallback, secret) = client_settings_snapshot_raw(state)?;
     let url = remote_client::resolve_base_url(&primary, &fallback).await?;
     Ok((url, secret))
@@ -3355,8 +3338,6 @@ async fn remote_push_all(state: State<'_, AppState>) -> Result<usize, String> {
     }
     Ok(ok)
 }
-
-
 
 #[tauri::command]
 async fn remote_pull_all(state: State<'_, AppState>) -> Result<usize, String> {
@@ -3453,10 +3434,7 @@ async fn remote_pull_all_tokens(
 }
 
 #[tauri::command]
-async fn remote_delete_account_cmd(
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<(), String> {
+async fn remote_delete_account_cmd(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let (url, secret) = client_settings_snapshot(&state).await?;
     remote_client::delete_account(&url, &secret, &id).await
 }
@@ -3963,8 +3941,6 @@ pub fn run() {
             remote_refresh_account_quota,
             remote_sync_skills,
             remote_restart_server,
-            get_compression_stats,
-            reset_compression_stats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
