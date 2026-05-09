@@ -53,7 +53,10 @@ pub struct BulkParsedAccountInfo {
 /// 入口：根据文件名 + 内容嗅探并分发。
 /// `content_b64` 是文件内容的 base64 编码（前端读 binary 转 base64 传过来，
 /// 文本 / json / zip 全部走同一通道）。
-pub fn parse_one_file(filename: &str, content_b64: &str) -> Result<(String, Vec<ParsedAccount>), String> {
+pub fn parse_one_file(
+    filename: &str,
+    content_b64: &str,
+) -> Result<(String, Vec<ParsedAccount>), String> {
     let raw = base64::engine::general_purpose::STANDARD
         .decode(content_b64.as_bytes())
         .map_err(|e| format!("base64 解码失败: {}", e))?;
@@ -69,7 +72,8 @@ pub fn parse_one_file(filename: &str, content_b64: &str) -> Result<(String, Vec<
 
     // 2) JSON 类格式：sub2api / cockpit / cpa-单文件 / native accounts.json
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        let v: Value = serde_json::from_str(trimmed).map_err(|e| format!("JSON 解析失败: {}", e))?;
+        let v: Value =
+            serde_json::from_str(trimmed).map_err(|e| format!("JSON 解析失败: {}", e))?;
         // sub2api：根对象有 "accounts" 数组 + "proxies" 字段（独有）
         if v.is_object()
             && v.get("accounts").map_or(false, |a| a.is_array())
@@ -87,9 +91,10 @@ pub fn parse_one_file(filename: &str, content_b64: &str) -> Result<(String, Vec<
                 return Ok(("cockpit".to_string(), parse_cockpit(arr)?));
             }
             // 顶层数组但每个元素长得像 cpa 单条（access_token + refresh_token 在根级）
-            if arr.iter().all(|x| {
-                x.get("access_token").is_some() && x.get("refresh_token").is_some()
-            }) {
+            if arr
+                .iter()
+                .all(|x| x.get("access_token").is_some() && x.get("refresh_token").is_some())
+            {
                 let parsed = arr
                     .iter()
                     .filter_map(|x| parse_cpa_single(x).ok())
@@ -98,7 +103,8 @@ pub fn parse_one_file(filename: &str, content_b64: &str) -> Result<(String, Vec<
             }
         }
         // 单个对象 + 根级 access_token / refresh_token / email → cpa 单文件
-        if v.get("access_token").is_some() && v.get("refresh_token").is_some()
+        if v.get("access_token").is_some()
+            && v.get("refresh_token").is_some()
             && v.get("email").is_some()
         {
             return Ok(("cpa".to_string(), vec![parse_cpa_single(&v)?]));
@@ -111,8 +117,14 @@ pub fn parse_one_file(filename: &str, content_b64: &str) -> Result<(String, Vec<
     }
 
     // 3) 文本格式：四段 RT
-    if trimmed.lines().any(|l| l.contains("----") && l.contains("rt_")) {
-        return Ok(("four-segment-rt".to_string(), parse_four_segment_rt(trimmed)?));
+    if trimmed
+        .lines()
+        .any(|l| l.contains("----") && l.contains("rt_"))
+    {
+        return Ok((
+            "four-segment-rt".to_string(),
+            parse_four_segment_rt(trimmed)?,
+        ));
     }
 
     Err("无法识别的文件格式".to_string())
@@ -124,7 +136,9 @@ fn parse_cpa_zip(bytes: &[u8]) -> Result<Vec<ParsedAccount>, String> {
     let mut zip = zip::ZipArchive::new(reader).map_err(|e| format!("zip 解析失败: {}", e))?;
     let mut out = Vec::new();
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| format!("zip entry {} 失败: {}", i, e))?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("zip entry {} 失败: {}", i, e))?;
         if !entry.is_file() {
             continue;
         }
@@ -149,12 +163,25 @@ fn parse_cpa_zip(bytes: &[u8]) -> Result<Vec<ParsedAccount>, String> {
 
 /// cpa 单条：access_token / refresh_token / id_token / email / account_id / expired
 fn parse_cpa_single(v: &Value) -> Result<ParsedAccount, String> {
-    let email = v.get("email").and_then(|x| x.as_str()).ok_or("缺 email")?.to_string();
-    let access_token = v.get("access_token").and_then(|x| x.as_str()).ok_or("缺 access_token")?;
-    let refresh_token = v.get("refresh_token").and_then(|x| x.as_str()).ok_or("缺 refresh_token")?;
+    let email = v
+        .get("email")
+        .and_then(|x| x.as_str())
+        .ok_or("缺 email")?
+        .to_string();
+    let access_token = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .ok_or("缺 access_token")?;
+    let refresh_token = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .ok_or("缺 refresh_token")?;
     let id_token = v.get("id_token").and_then(|x| x.as_str()).unwrap_or("");
     let account_id = v.get("account_id").and_then(|x| x.as_str()).unwrap_or("");
-    let expires_at = v.get("expired").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let expires_at = v
+        .get("expired")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     let last_refresh = v
         .get("last_refresh")
         .and_then(|x| x.as_str())
@@ -175,39 +202,58 @@ fn parse_cpa_single(v: &Value) -> Result<ParsedAccount, String> {
         email,
         auth_json,
         plan_type: None,
-        account_id: if account_id.is_empty() { None } else { Some(account_id.to_string()) },
+        account_id: if account_id.is_empty() {
+            None
+        } else {
+            Some(account_id.to_string())
+        },
         needs_refresh: false,
     })
 }
 
 /// sub2api：accounts[].credentials.*
 fn parse_sub2api(v: &Value) -> Result<Vec<ParsedAccount>, String> {
-    let arr = v.get("accounts").and_then(|x| x.as_array()).ok_or("无 accounts 数组")?;
+    let arr = v
+        .get("accounts")
+        .and_then(|x| x.as_array())
+        .ok_or("无 accounts 数组")?;
     let mut out = Vec::new();
     for acc in arr {
-        let name = acc.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let cred = acc.get("credentials").ok_or_else(|| format!("{} 缺 credentials", name))?;
+        let name = acc
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let cred = acc
+            .get("credentials")
+            .ok_or_else(|| format!("{} 缺 credentials", name))?;
         let access_token = match cred.get("access_token").and_then(|x| x.as_str()) {
             Some(s) => s,
             None => continue, // 没 access_token 跳过（rt-only 应走四段 RT 路径）
         };
-        let refresh_token = cred.get("refresh_token").and_then(|x| x.as_str()).unwrap_or("");
+        let refresh_token = cred
+            .get("refresh_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         let id_token = cred.get("id_token").and_then(|x| x.as_str()).unwrap_or("");
         let email = cred
             .get("email")
             .and_then(|x| x.as_str())
             .unwrap_or(&name)
             .to_string();
-        let account_id = cred.get("chatgpt_account_id").and_then(|x| x.as_str()).unwrap_or("");
-        let plan_type = cred.get("plan_type").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let expires_at = cred
-            .get("expires_at")
-            .and_then(|x| x.as_i64())
-            .map(|ts| {
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_default()
-            });
+        let account_id = cred
+            .get("chatgpt_account_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let plan_type = cred
+            .get("plan_type")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let expires_at = cred.get("expires_at").and_then(|x| x.as_i64()).map(|ts| {
+            chrono::DateTime::from_timestamp(ts, 0)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_default()
+        });
 
         let auth_json = json!({
             "tokens": {
@@ -223,7 +269,11 @@ fn parse_sub2api(v: &Value) -> Result<Vec<ParsedAccount>, String> {
             email,
             auth_json,
             plan_type,
-            account_id: if account_id.is_empty() { None } else { Some(account_id.to_string()) },
+            account_id: if account_id.is_empty() {
+                None
+            } else {
+                Some(account_id.to_string())
+            },
             needs_refresh: refresh_token.is_empty(),
         });
     }
@@ -242,11 +292,26 @@ fn parse_cockpit(arr: &[Value]) -> Result<Vec<ParsedAccount>, String> {
             Some(t) => t,
             None => continue,
         };
-        let access_token = tokens.get("access_token").and_then(|x| x.as_str()).unwrap_or("");
-        let refresh_token = tokens.get("refresh_token").and_then(|x| x.as_str()).unwrap_or("");
-        let id_token = tokens.get("id_token").and_then(|x| x.as_str()).unwrap_or("");
-        let account_id = entry.get("account_id").and_then(|x| x.as_str()).unwrap_or("");
-        let plan_type = entry.get("plan_type").and_then(|x| x.as_str()).map(|s| s.to_string());
+        let access_token = tokens
+            .get("access_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let refresh_token = tokens
+            .get("refresh_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let id_token = tokens
+            .get("id_token")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let account_id = entry
+            .get("account_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let plan_type = entry
+            .get("plan_type")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
 
         if access_token.is_empty() && refresh_token.is_empty() {
             continue;
@@ -266,7 +331,11 @@ fn parse_cockpit(arr: &[Value]) -> Result<Vec<ParsedAccount>, String> {
             email,
             auth_json,
             plan_type,
-            account_id: if account_id.is_empty() { None } else { Some(account_id.to_string()) },
+            account_id: if account_id.is_empty() {
+                None
+            } else {
+                Some(account_id.to_string())
+            },
             needs_refresh: access_token.is_empty(),
         });
     }
@@ -366,21 +435,40 @@ mod tests {
     #[ignore]
     fn real_files() {
         let cases = [
-            ("/Users/xiaojian/Downloads/chrome/sub2api-import.json", "sub2api"),
-            ("/Users/xiaojian/Downloads/chrome/cockpit-import.json", "cockpit"),
-            ("/Users/xiaojian/Downloads/chrome/accounts_refresh_tokens.txt", "four-segment-rt"),
-            ("/Users/xiaojian/Downloads/chrome/codex_credentials_2026-05-06_10-30-01_CST.zip", "cpa"),
+            (
+                "/Users/xiaojian/Downloads/chrome/sub2api-import.json",
+                "sub2api",
+            ),
+            (
+                "/Users/xiaojian/Downloads/chrome/cockpit-import.json",
+                "cockpit",
+            ),
+            (
+                "/Users/xiaojian/Downloads/chrome/accounts_refresh_tokens.txt",
+                "four-segment-rt",
+            ),
+            (
+                "/Users/xiaojian/Downloads/chrome/codex_credentials_2026-05-06_10-30-01_CST.zip",
+                "cpa",
+            ),
         ];
         for (path, expected_fmt) in cases {
             let raw = std::fs::read(path).expect(&format!("read {}", path));
             let b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
-            let filename = std::path::Path::new(path).file_name().unwrap().to_str().unwrap();
+            let filename = std::path::Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap();
             let (fmt, parsed) = parse_one_file(filename, &b64).expect(&format!("parse {}", path));
             assert_eq!(fmt, expected_fmt, "format mismatch for {}", path);
             assert!(!parsed.is_empty(), "no accounts parsed from {}", path);
             println!("✓ {} → {} accounts ({})", filename, parsed.len(), fmt);
             for p in &parsed {
-                println!("    {} plan={:?} needs_refresh={}", p.email, p.plan_type, p.needs_refresh);
+                println!(
+                    "    {} plan={:?} needs_refresh={}",
+                    p.email, p.plan_type, p.needs_refresh
+                );
             }
         }
     }
@@ -403,7 +491,11 @@ fn parse_native(v: &Value) -> Result<Vec<ParsedAccount>, String> {
         .ok_or("native: 缺 accounts 对象")?;
     let mut out = Vec::new();
     for (_id, acc) in accounts {
-        let email = acc.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let email = acc
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let auth_json = acc.get("auth_json").cloned().unwrap_or(Value::Null);
         if email.is_empty() || auth_json.is_null() {
             continue;

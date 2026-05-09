@@ -193,6 +193,10 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
     const [relayModelFallback, setRelayModelFallback] = useState<string>(
         RELAY_PRESETS[0]?.model_fallback ?? '',
     );
+    // 上游协议：'responses'（默认 / 上游懂 codex /v1/responses）/ 'chat_completions'（GLM 等只懂 /chat/completions 的）
+    const [relayProtocol, setRelayProtocol] = useState<string>(
+        RELAY_PRESETS[0]?.relay_protocol ?? 'responses',
+    );
     // 模型映射用 textarea（"key=value\n..." 格式）展示给用户编辑
     const [relayModelMapText, setRelayModelMapText] = useState<string>(() => {
         const m = RELAY_PRESETS[0]?.model_map;
@@ -209,6 +213,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
             setRelayBaseUrl(preset.base_url);
             setRelayUsagePreset(preset.usage_preset ?? null);
             setRelayModelFallback(preset.model_fallback ?? '');
+            setRelayProtocol(preset.relay_protocol ?? 'responses');
             const m = preset.model_map ?? {};
             setRelayModelMapText(Object.entries(m).map(([k, v]) => `${k}=${v}`).join('\n'));
         }
@@ -257,6 +262,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                 notes: `from preset:${relayPresetId}`,
                 modelMap: Object.keys(modelMap).length > 0 ? modelMap : null,
                 modelFallback: relayModelFallback.trim() || null,
+                relayProtocol: relayProtocol === 'responses' ? null : relayProtocol,
             });
             await emit('accounts-updated');
             // 重置表单
@@ -795,6 +801,23 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                     <option value="">不拉取</option>
                                     <option value="openai_compat">openai_compat (GET /v1/usage)</option>
                                     <option value="glm_zhipu">glm_zhipu (GLM 自家 quota 接口)</option>
+                                </select>
+                            </div>
+
+                            <div className="form-group">
+                                <label htmlFor="relay-protocol">
+                                    上游协议 <span style={{ color: 'var(--text-muted)', fontWeight: 'normal', fontSize: 12 }}>
+                                        中转站讲什么 wire format
+                                    </span>
+                                </label>
+                                <select
+                                    id="relay-protocol"
+                                    value={relayProtocol}
+                                    onChange={e => setRelayProtocol(e.target.value)}
+                                    disabled={relaySubmitting}
+                                >
+                                    <option value="responses">responses（默认 / Unity2、ChatGPT、OpenAI key）</option>
+                                    <option value="chat_completions">chat_completions（GLM Coding Plan / 通用 OpenAI Chat）</option>
                                 </select>
                             </div>
 

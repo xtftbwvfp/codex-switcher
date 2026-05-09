@@ -1,0 +1,17 @@
+Source: https://github.com/cornellsh/codex-proxy
+License: MIT (see https://github.com/cornellsh/codex-proxy/blob/main/LICENSE)
+
+The Python files in this directory are verbatim copies of the relevant
+modules from cornellsh/codex-proxy@main. They are kept here as documentation
+ONLY — for porting to Rust inside src-tauri/src/relay_translate.rs. They are
+not compiled into the codex-switcher binary.
+
+When porting, retain the same algorithmic decisions:
+- normalizer.py    — codex /v1/responses → OpenAI Chat messages array
+- zai_provider.py  — payload preparation, tool transformations, sync response mapping
+- zai_stream.py    — SSE event mapping (chat completion deltas → Responses events)
+
+Files:
+- normalizer.py    (verbatim, comments stripped for brevity)
+- zai_provider.py  (verbatim, comments stripped for brevity)
+- zai_stream.py    (verbatim, comments stripped for brevity)

@@ -145,8 +145,7 @@ pub fn init_ssot() -> Result<(), String> {
 
     // SSOT 不存在 → 需要创建
     if !ssot.exists() {
-        std::fs::create_dir_all(&ssot)
-            .map_err(|e| format!("创建 SSOT 目录失败: {}", e))?;
+        std::fs::create_dir_all(&ssot).map_err(|e| format!("创建 SSOT 目录失败: {}", e))?;
 
         // 如果 ~/.codex/skills/ 是真实目录（有内容），迁移过来
         if codex_skills.exists() && codex_skills.is_dir() && !codex_skills.is_symlink() {
@@ -235,7 +234,13 @@ fn link_app_to_ssot(app: &str) -> Result<(), String> {
     {
         // Windows: 用 junction（不需要管理员权限）
         let status = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J", &target.to_string_lossy(), &ssot.to_string_lossy()])
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &target.to_string_lossy(),
+                &ssot.to_string_lossy(),
+            ])
             .output();
 
         match status {
@@ -279,8 +284,7 @@ impl SkillStore {
 
     pub fn save(data: &SkillData) -> Result<(), String> {
         let path = data_path();
-        let json = serde_json::to_string_pretty(data)
-            .map_err(|e| format!("序列化失败: {}", e))?;
+        let json = serde_json::to_string_pretty(data).map_err(|e| format!("序列化失败: {}", e))?;
         std::fs::write(&path, json).map_err(|e| format!("写入失败: {}", e))
     }
 
@@ -291,11 +295,8 @@ impl SkillStore {
             return 0;
         }
 
-        let existing_dirs: std::collections::HashSet<String> = data
-            .skills
-            .iter()
-            .map(|s| s.directory.clone())
-            .collect();
+        let existing_dirs: std::collections::HashSet<String> =
+            data.skills.iter().map(|s| s.directory.clone()).collect();
 
         let mut imported = 0;
 
@@ -345,8 +346,7 @@ impl SkillStore {
     /// 切换某个 app 的整个 skills 目录 symlink
     /// 新架构：整个目录是 symlink，不需要 per-skill 同步
     pub fn toggle_app_link(app: &str, enabled: bool) -> Result<(), String> {
-        let target = app_skills_dir(app)
-            .ok_or_else(|| format!("未知 app: {}", app))?;
+        let target = app_skills_dir(app).ok_or_else(|| format!("未知 app: {}", app))?;
         let ssot = ssot_dir();
 
         if enabled {
@@ -428,7 +428,8 @@ impl SkillStore {
             };
 
             // 解压到临时目录
-            let tmp = std::env::temp_dir().join(format!("codex-skills-{}-{}", repo.owner, repo.name));
+            let tmp =
+                std::env::temp_dir().join(format!("codex-skills-{}-{}", repo.owner, repo.name));
             let _ = std::fs::remove_dir_all(&tmp);
             let _ = std::fs::create_dir_all(&tmp);
 
@@ -641,8 +642,7 @@ fn extract_zip(data: &[u8], target: &std::path::Path) -> Result<(), String> {
     use std::io::{Cursor, Read, Write};
 
     let reader = Cursor::new(data);
-    let mut archive =
-        zip::ZipArchive::new(reader).map_err(|e| format!("打开 ZIP 失败: {}", e))?;
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("打开 ZIP 失败: {}", e))?;
 
     for i in 0..archive.len() {
         let mut file = archive
@@ -658,8 +658,8 @@ fn extract_zip(data: &[u8], target: &std::path::Path) -> Result<(), String> {
             if let Some(parent) = out_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let mut out = std::fs::File::create(&out_path)
-                .map_err(|e| format!("创建文件失败: {}", e))?;
+            let mut out =
+                std::fs::File::create(&out_path).map_err(|e| format!("创建文件失败: {}", e))?;
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)
                 .map_err(|e| format!("读取失败: {}", e))?;
@@ -683,8 +683,7 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("复制文件失败: {}", e))?;
+            std::fs::copy(&src_path, &dst_path).map_err(|e| format!("复制文件失败: {}", e))?;
         }
     }
 
@@ -827,7 +826,9 @@ pub fn zip_skill_dir(name: &str) -> Result<Vec<u8>, String> {
     }
 
     walk(&root, &ssot_dir(), &mut zip, &opts, &dir_opts)?;
-    let cursor = zip.finish().map_err(|e| format!("finish zip 失败: {}", e))?;
+    let cursor = zip
+        .finish()
+        .map_err(|e| format!("finish zip 失败: {}", e))?;
     Ok(cursor.into_inner())
 }
 
@@ -851,8 +852,8 @@ pub fn extract_skill_zip(name: &str, bytes: &[u8]) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("创建 staging 失败: {}", e))?;
 
-    let mut archive = ZipArchive::new(Cursor::new(bytes))
-        .map_err(|e| format!("打开 zip 失败: {}", e))?;
+    let mut archive =
+        ZipArchive::new(Cursor::new(bytes)).map_err(|e| format!("打开 zip 失败: {}", e))?;
 
     for i in 0..archive.len() {
         let mut entry = archive
@@ -868,10 +869,7 @@ pub fn extract_skill_zip(name: &str, bytes: &[u8]) -> Result<(), String> {
             .next()
             .ok_or_else(|| "zip 条目缺少顶层目录".to_string())?;
         if first.as_os_str() != std::ffi::OsStr::new(name) {
-            return Err(format!(
-                "zip 顶层目录 {:?} 与期望 {} 不一致",
-                first, name
-            ));
+            return Err(format!("zip 顶层目录 {:?} 与期望 {} 不一致", first, name));
         }
         let rel: std::path::PathBuf = comps.collect();
         let dest = staging.join(&rel);
@@ -879,8 +877,7 @@ pub fn extract_skill_zip(name: &str, bytes: &[u8]) -> Result<(), String> {
             std::fs::create_dir_all(&dest).map_err(|e| format!("创建目录失败: {}", e))?;
         } else {
             if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("创建父目录失败: {}", e))?;
+                std::fs::create_dir_all(parent).map_err(|e| format!("创建父目录失败: {}", e))?;
             }
             let mut out = std::fs::File::create(&dest)
                 .map_err(|e| format!("创建文件失败 {:?}: {}", dest, e))?;
@@ -894,10 +891,7 @@ pub fn extract_skill_zip(name: &str, bytes: &[u8]) -> Result<(), String> {
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = entry.unix_mode() {
-                    let _ = std::fs::set_permissions(
-                        &dest,
-                        std::fs::Permissions::from_mode(mode),
-                    );
+                    let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode));
                 }
             }
         }
@@ -905,8 +899,7 @@ pub fn extract_skill_zip(name: &str, bytes: &[u8]) -> Result<(), String> {
 
     // 原子替换：如果已有 target，先 rename 到 backup，再 rename staging 到 target
     if target.exists() {
-        std::fs::rename(&target, &backup)
-            .map_err(|e| format!("备份原目录失败: {}", e))?;
+        std::fs::rename(&target, &backup).map_err(|e| format!("备份原目录失败: {}", e))?;
     }
     match std::fs::rename(&staging, &target) {
         Ok(_) => {

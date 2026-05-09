@@ -449,11 +449,13 @@ impl UsageFetcher {
     ) -> Result<crate::account::RelayUsageCache, String> {
         let origin = url::Url::parse(base_url)
             .ok()
-            .and_then(|u| u.host_str().map(|h| {
-                let scheme = u.scheme();
-                let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
-                format!("{}://{}{}", scheme, h, port)
-            }))
+            .and_then(|u| {
+                u.host_str().map(|h| {
+                    let scheme = u.scheme();
+                    let port = u.port().map(|p| format!(":{}", p)).unwrap_or_default();
+                    format!("{}://{}{}", scheme, h, port)
+                })
+            })
             .ok_or_else(|| format!("无法从 base_url 解析 origin: {}", base_url))?;
 
         let url = format!("{}/api/monitor/usage/quota/limit", origin);
@@ -511,16 +513,17 @@ impl UsageFetcher {
             });
 
         // 计算 remaining 百分比（用 tokens 维度；优先级：TOKENS_LIMIT > TIME_LIMIT > 100）
-        let used_pct = tokens_pct.or_else(|| {
-            body.get("data")
-                .and_then(|d| d.get("limits"))
-                .and_then(|v| v.as_array())
-                .and_then(|arr| {
-                    arr.iter().find_map(|lim| {
-                        lim.get("percentage").and_then(|v| v.as_f64())
+        let used_pct = tokens_pct
+            .or_else(|| {
+                body.get("data")
+                    .and_then(|d| d.get("limits"))
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| {
+                        arr.iter()
+                            .find_map(|lim| lim.get("percentage").and_then(|v| v.as_f64()))
                     })
-                })
-        }).unwrap_or(0.0);
+            })
+            .unwrap_or(0.0);
         let remaining_pct = (100.0 - used_pct).max(0.0);
 
         // 取 nextResetTime（毫秒时间戳）→ Unix 秒
@@ -529,9 +532,8 @@ impl UsageFetcher {
             .and_then(|d| d.get("limits"))
             .and_then(|v| v.as_array())
             .and_then(|arr| {
-                arr.iter().find_map(|lim| {
-                    lim.get("nextResetTime").and_then(|v| v.as_i64())
-                })
+                arr.iter()
+                    .find_map(|lim| lim.get("nextResetTime").and_then(|v| v.as_i64()))
             })
             .map(|ms| ms / 1000);
 

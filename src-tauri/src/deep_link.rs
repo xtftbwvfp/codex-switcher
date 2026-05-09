@@ -131,15 +131,15 @@ pub fn parse(url: &str) -> Result<PendingRelayImport, DeepLinkError> {
         return Err(DeepLinkError::InvalidApiKey);
     }
 
-    let homepage = params
-        .get("homepage")
-        .filter(|v| !v.is_empty())
-        .cloned();
+    let homepage = params.get("homepage").filter(|v| !v.is_empty()).cloned();
 
     // usage_preset 优先级：
     // 1) 显式 usage_preset 字段（codexswitch 推荐）
     // 2) ccswitch 的 usageScript → base64 解码 → SHA-256 → 白名单匹配
-    let mut usage_preset = params.get("usage_preset").cloned().filter(|v| !v.is_empty());
+    let mut usage_preset = params
+        .get("usage_preset")
+        .cloned()
+        .filter(|v| !v.is_empty());
     let mut usage_script_unknown = false;
 
     if usage_preset.is_none() {
@@ -221,7 +221,8 @@ mod tests {
 
     #[test]
     fn rejects_http_base_url_via_javascript_pseudo() {
-        let url = "codexswitch://v1/import?name=X&base_url=javascript%3Aalert(1)&api_key=sk-aaaaaaaa";
+        let url =
+            "codexswitch://v1/import?name=X&base_url=javascript%3Aalert(1)&api_key=sk-aaaaaaaa";
         assert!(matches!(parse(url), Err(DeepLinkError::InvalidBaseUrl)));
     }
 
@@ -255,7 +256,8 @@ mod tests {
 
     #[test]
     fn trailing_slash_on_base_url_is_normalized() {
-        let url = "codexswitch://v1/import?name=X&base_url=https%3A%2F%2Fy.com%2F&api_key=sk-aaaaaaaa";
+        let url =
+            "codexswitch://v1/import?name=X&base_url=https%3A%2F%2Fy.com%2F&api_key=sk-aaaaaaaa";
         let p = parse(url).unwrap();
         assert_eq!(p.base_url, "https://y.com");
     }

@@ -27,7 +27,8 @@ impl MailboxProvider {
     pub async fn fetch_otp(&self, email: &str, deadline: Instant) -> Result<OtpHit, String> {
         match self {
             Self::Usmail(p) => {
-                p.fetch_otp(email, deadline, &["openai.com", "noreply"]).await
+                p.fetch_otp(email, deadline, &["openai.com", "noreply"])
+                    .await
             }
             Self::Sorryios(p) => p.fetch_otp(email, deadline).await,
             Self::NissanSerena(p) => p.fetch_otp(email, deadline).await,
@@ -127,23 +128,30 @@ impl UsmailMyId {
                     }
                     if let Some(since) = self.since_unix_ms {
                         // usmail.my.id: ISO-8601 字符串字段 "time"。其他兜底也尝试一下。
-                        let mail_ms = ["time", "date", "receivedAt", "received_at", "createdAt", "created_at"]
-                            .iter()
-                            .find_map(|key| {
-                                let v = m.get(*key)?;
-                                if let Some(s) = v.as_str() {
-                                    chrono::DateTime::parse_from_rfc3339(s)
-                                        .ok()
-                                        .map(|d| d.timestamp_millis())
-                                        .or_else(|| {
-                                            chrono::DateTime::parse_from_rfc2822(s)
-                                                .ok()
-                                                .map(|d| d.timestamp_millis())
-                                        })
-                                } else {
-                                    v.as_i64()
-                                }
-                            });
+                        let mail_ms = [
+                            "time",
+                            "date",
+                            "receivedAt",
+                            "received_at",
+                            "createdAt",
+                            "created_at",
+                        ]
+                        .iter()
+                        .find_map(|key| {
+                            let v = m.get(*key)?;
+                            if let Some(s) = v.as_str() {
+                                chrono::DateTime::parse_from_rfc3339(s)
+                                    .ok()
+                                    .map(|d| d.timestamp_millis())
+                                    .or_else(|| {
+                                        chrono::DateTime::parse_from_rfc2822(s)
+                                            .ok()
+                                            .map(|d| d.timestamp_millis())
+                                    })
+                            } else {
+                                v.as_i64()
+                            }
+                        });
                         if let Some(ms) = mail_ms {
                             if ms < since {
                                 eprintln!(
@@ -281,7 +289,11 @@ impl SorryiosNet {
             eprintln!(
                 "[Mailbox/sorryios] poll#{polls} status={} body={}",
                 status,
-                if raw.len() > 600 { format!("{}…[{}b]", &raw[..600], raw.len()) } else { raw.clone() }
+                if raw.len() > 600 {
+                    format!("{}…[{}b]", &raw[..600], raw.len())
+                } else {
+                    raw.clone()
+                }
             );
             let v: Value = match serde_json::from_str(&raw) {
                 Ok(v) => v,
@@ -411,14 +423,23 @@ impl NissanSerena {
             r"(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4}),\s*(\d{1,2}):(\d{2})",
         )
         .unwrap();
-        let code = re_code.captures(&html).and_then(|c| c.get(1)).map(|m| m.as_str().to_string());
-        let time = re_time.captures(&html).map(|c| c.get(0).unwrap().as_str().to_string());
+        let code = re_code
+            .captures(&html)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string());
+        let time = re_time
+            .captures(&html)
+            .map(|c| c.get(0).unwrap().as_str().to_string());
         Ok(code.map(|c| (c, time.unwrap_or_default())))
     }
 
     pub async fn fetch_otp(&self, email: &str, deadline: Instant) -> Result<OtpHit, String> {
         // 先 GET /otp 拿 session cookie（reqwest cookie_store 自动接管）
-        let _ = self.client.get("https://nissanserena.my.id/otp").send().await;
+        let _ = self
+            .client
+            .get("https://nissanserena.my.id/otp")
+            .send()
+            .await;
 
         // baseline: 第一次拉到的 code，等到看见不同的 6 位（且时间 >= since 的话也合规）才返回
         let (mut baseline_code, mut baseline_time) = match self.fetch_top(email).await {
@@ -443,9 +464,7 @@ impl NissanSerena {
 
             match self.fetch_top(email).await {
                 Ok(Some((code, time))) => {
-                    eprintln!(
-                        "[Mailbox/nissanserena] poll#{polls} top code={code} time={time}"
-                    );
+                    eprintln!("[Mailbox/nissanserena] poll#{polls} top code={code} time={time}");
                     let is_new = match &baseline_code {
                         Some(b) => *b != code,
                         None => true, // baseline 为空 → 任何码都算新

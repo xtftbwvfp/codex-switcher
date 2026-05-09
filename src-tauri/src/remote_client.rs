@@ -451,10 +451,7 @@ pub async fn refresh_account_quota(
             .to_string();
         return Err(err);
     }
-    let usage = body
-        .get("usage")
-        .cloned()
-        .ok_or("响应缺少 usage 字段")?;
+    let usage = body.get("usage").cloned().ok_or("响应缺少 usage 字段")?;
     serde_json::from_value(usage).map_err(|e| format!("反序列化 usage 失败: {}", e))
 }
 
