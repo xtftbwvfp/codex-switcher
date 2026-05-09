@@ -317,8 +317,6 @@ export function Settings() {
                     </label>
                 </div>
 
-                <p className="muted">Shell 输出压缩已迁移到 <a href="https://github.com/rtk-ai/rtk">rtk</a>（rtk hook claude）—— 不再在代理层做。</p>
-
                 {
                     settings.background_refresh && settings.remote_mode !== 'client' && (
                         <>
