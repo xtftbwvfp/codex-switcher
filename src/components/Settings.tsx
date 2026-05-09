@@ -27,21 +27,12 @@ interface AppSettings {
     proxy_bootstrap_time_cap_ms: number;
     relay_auto_switch_out: boolean;
     relay_auto_switch_in: boolean;
-    output_compression_enabled: boolean;
-    output_compression_threshold_bytes: number;
 }
 
 interface RemoteHealth {
     mode: string;
     version: string;
     account_count: number;
-}
-
-interface CompressStats {
-    frames_seen: number;
-    frames_compressed: number;
-    bytes_in: number;
-    bytes_out: number;
 }
 
 const IDE_OPTIONS = [
@@ -77,15 +68,12 @@ export function Settings() {
         proxy_bootstrap_time_cap_ms: 8000,
         relay_auto_switch_out: true,
         relay_auto_switch_in: false,
-        output_compression_enabled: true,
-        output_compression_threshold_bytes: 8192,
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
     const [remoteBusy, setRemoteBusy] = useState(false);
     const [remoteStatus, setRemoteStatus] = useState<string>('');
-    const [compressStats, setCompressStats] = useState<CompressStats | null>(null);
 
     useEffect(() => {
         loadSettings();
@@ -99,51 +87,6 @@ export function Settings() {
             console.error('加载设置失败:', e);
         }
     };
-
-    const loadCompressStats = async () => {
-        try {
-            const s = await invoke<CompressStats>('get_compression_stats');
-            setCompressStats(s);
-        } catch (e) {
-            // backend may not be wired yet — keep silent
-            console.debug('get_compression_stats failed:', e);
-        }
-    };
-
-    useEffect(() => {
-        loadCompressStats();
-        const t = setInterval(loadCompressStats, 5000);
-        return () => clearInterval(t);
-    }, []);
-
-    const handleResetCompressStats = async () => {
-        try {
-            await invoke('reset_compression_stats');
-            await loadCompressStats();
-            setMessage({ type: 'success', text: '✅ 压缩统计已重置' });
-            setTimeout(() => setMessage(null), 2000);
-        } catch (e) {
-            setMessage({ type: 'error', text: `❌ 重置失败: ${e}` });
-        }
-    };
-
-    const formatBytes = (n: number): string => {
-        if (n < 1024) return `${n} B`;
-        if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-        if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
-        return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
-    };
-
-    const compressPct = (() => {
-        if (!compressStats || compressStats.frames_seen === 0) return 0;
-        return (compressStats.frames_compressed / compressStats.frames_seen) * 100;
-    })();
-
-    const savedBytes = compressStats ? Math.max(0, compressStats.bytes_in - compressStats.bytes_out) : 0;
-    const savedPct = (() => {
-        if (!compressStats || compressStats.bytes_in === 0) return 0;
-        return (savedBytes / compressStats.bytes_in) * 100;
-    })();
 
     const saveSettings = async () => {
         setSaving(true);
@@ -374,75 +317,7 @@ export function Settings() {
                     </label>
                 </div>
 
-                <div className="setting-item">
-                    <div className="setting-info">
-                        <span className="setting-label">出站压缩 / 压缩超长 shell 输出</span>
-                        <span className="setting-desc">
-                            默认开启。codex/claude 调 shell 命令（exec_command / Bash 等）时，长输出会被截断（保留首 50 + 尾 20 行），节省 50%+ tokens。
-                        </span>
-                    </div>
-                    <label className="toggle">
-                        <input
-                            type="checkbox"
-                            checked={settings.output_compression_enabled ?? true}
-                            onChange={e => updateField('output_compression_enabled', e.target.checked)}
-                        />
-                        <span className="toggle-slider"></span>
-                    </label>
-                </div>
-
-                {(settings.output_compression_enabled ?? true) && (
-                    <>
-                        <div className="setting-item sub-item">
-                            <div className="setting-info">
-                                <span className="setting-label">压缩阈值 (KB)</span>
-                                <span className="setting-desc">超过此长度才压缩。默认 8 KB。</span>
-                            </div>
-                            <input
-                                type="number"
-                                className="number-input"
-                                min={1}
-                                max={128}
-                                value={Math.max(1, Math.round((settings.output_compression_threshold_bytes ?? 8192) / 1024))}
-                                onChange={e => {
-                                    const kb = parseInt(e.target.value);
-                                    const clamped = Math.max(1, Math.min(128, isNaN(kb) ? 8 : kb));
-                                    updateField('output_compression_threshold_bytes', clamped * 1024);
-                                }}
-                            />
-                        </div>
-
-                        <div className="setting-item sub-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 10 }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span className="setting-label">压缩统计</span>
-                                <button
-                                    className="action-button"
-                                    onClick={handleResetCompressStats}
-                                    style={{ padding: '6px 12px', fontSize: 12 }}
-                                >
-                                    重置统计
-                                </button>
-                            </div>
-                            <div style={{ fontFamily: "'SF Mono', 'Fira Code', monospace", fontSize: 12, color: 'var(--text-muted)', display: 'grid', gridTemplateColumns: '1fr', gap: 4 }}>
-                                <div>
-                                    累计帧数：<span style={{ color: 'var(--text-primary)' }}>{compressStats?.frames_seen ?? 0}</span>
-                                    {'  /  '}
-                                    已压缩：<span style={{ color: 'var(--text-primary)' }}>{compressStats?.frames_compressed ?? 0}</span>
-                                    {'  ('}{compressPct.toFixed(1)}%{')'}
-                                </div>
-                                <div>
-                                    输入：<span style={{ color: 'var(--text-primary)' }}>{formatBytes(compressStats?.bytes_in ?? 0)}</span>
-                                    {'  →  '}
-                                    输出：<span style={{ color: 'var(--text-primary)' }}>{formatBytes(compressStats?.bytes_out ?? 0)}</span>
-                                </div>
-                                <div>
-                                    节省：<span style={{ color: 'var(--primary-color)', fontWeight: 600 }}>{formatBytes(savedBytes)}</span>
-                                    {' ('}{savedPct.toFixed(1)}%{')'}
-                                </div>
-                            </div>
-                        </div>
-                    </>
-                )}
+                <p className="muted">Shell 输出压缩已迁移到 <a href="https://github.com/rtk-ai/rtk">rtk</a>（rtk hook claude）—— 不再在代理层做。</p>
 
                 {
                     settings.background_refresh && settings.remote_mode !== 'client' && (
