@@ -13,8 +13,8 @@ interface AddRelayModalProps {
 
 const GROUPS: Array<{ id: NonNullable<RelayPreset['group']>; note: string }> = [
     { id: '通用中转', note: '基于 new-api / CLIProxyAPI / sub2api 的第三方中转，原生 /v1/responses' },
-    { id: '国内 Coding Plan', note: '订阅 / 直连官方，多数需要 chat_completions 翻译' },
-    { id: '海外 / 小众', note: '按量付费 · 美元结算' },
+    { id: 'CODING PLAN', note: '厂商自家订阅（GLM / MiMo / 火山 / UCloud），走 chat_completions 翻译' },
+    { id: '三方模型', note: '厂商按量付费 API（DeepSeek / Kimi / 通义 / OpenRouter 等）' },
     { id: '自定义', note: '手动填 base_url' },
 ];
 

@@ -38,7 +38,7 @@ export interface RelayPreset {
     /** 展示用：monogram 背景色（hex） */
     color?: string;
     /** 展示用：在 AddRelay 卡片选择器中的分组 */
-    group?: '通用中转' | '国内 Coding Plan' | '海外 / 小众' | '自定义';
+    group?: '通用中转' | 'CODING PLAN' | '三方模型' | '自定义';
     /** 默认 API Key 前缀（占位提示用） */
     auth_prefix?: string;
     /**
@@ -71,7 +71,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'glm-5.1-x',
         },
         description: 'GLM-5.1，OpenAI 兼容；模型自动映射 gpt-* → glm-*',
-        mark: 'GLM', color: '#4F46E5', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: 'GLM', color: '#4F46E5', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -93,7 +93,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'glm-5.1-x',
         },
         description: 'GLM Coding Plan（codex /v1/responses ↔ /chat/completions 翻译，内置）',
-        mark: 'GLM', color: '#4F46E5', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: 'GLM', color: '#4F46E5', group: 'CODING PLAN', auth_prefix: 'sk-',
         category: 'coding_plan',
     },
     {
@@ -115,7 +115,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'mimo-v2.5-pro',
         },
         description: 'Xiaomi MiMo-V2.5 Token Plan（tp-key；配额用控制台 Cookie）',
-        mark: 'Mi', color: '#FF6900', group: '国内 Coding Plan', auth_prefix: 'tp-',
+        mark: 'Mi', color: '#FF6900', group: 'CODING PLAN', auth_prefix: 'tp-',
         category: 'coding_plan',
     },
     // ────────────────────────────────────────────────────────────────
@@ -148,18 +148,20 @@ export const RELAY_PRESETS: RelayPreset[] = [
         homepage: 'https://api-docs.deepseek.com/',
         usage_preset: null,
         relay_protocol: 'chat_completions',
-        model_fallback: 'deepseek-chat',
+        // 顶端用 V4 Pro（含 thinking）；轻量请求映到 V4 Flash 节省费用。
+        // 实测：gpt-5 / gpt-5.5 / gpt-5-codex / o1 走 Pro；gpt-4o / gpt-4o-mini / o1-mini 走 Flash。
+        model_fallback: 'deepseek-v4-pro',
         model_map: {
-            'gpt-5.5': 'deepseek-chat',
-            'gpt-5': 'deepseek-chat',
-            'gpt-5-codex': 'deepseek-chat',
-            'gpt-4o': 'deepseek-chat',
-            'gpt-4o-mini': 'deepseek-chat',
-            'o1': 'deepseek-reasoner',
-            'o1-mini': 'deepseek-reasoner',
+            'gpt-5.5': 'deepseek-v4-pro',
+            'gpt-5': 'deepseek-v4-pro',
+            'gpt-5-codex': 'deepseek-v4-pro',
+            'gpt-4o': 'deepseek-v4-flash',
+            'gpt-4o-mini': 'deepseek-v4-flash',
+            'o1': 'deepseek-v4-pro',
+            'o1-mini': 'deepseek-v4-flash',
         },
-        description: 'DeepSeek 按量付费（V3.1 chat / reasoner）；OpenAI Chat 兼容',
-        mark: 'DS', color: '#1E40AF', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        description: 'DeepSeek 按量付费（V4 Pro / V4 Flash）；OpenAI Chat 兼容',
+        mark: 'DS', color: '#1E40AF', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -180,7 +182,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'kimi-k2-0905-preview',
         },
         description: 'Moonshot Kimi K2（按量付费 / 中国订阅 / 国际订阅），OpenAI Chat 兼容',
-        mark: 'K', color: '#0F0F10', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: 'K', color: '#0F0F10', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -201,7 +203,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'MiniMax-M2',
         },
         description: 'MiniMax M2（按量付费 / 中国订阅 / 国际订阅），OpenAI Chat 兼容',
-        mark: 'MM', color: '#7C3AED', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: 'MM', color: '#7C3AED', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -222,7 +224,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'qwen-plus',
         },
         description: '阿里百炼 / 通义千问，OpenAI 兼容模式；qwen3-max 兜底',
-        mark: '通义', color: '#FF6A00', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: '通义', color: '#FF6A00', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -236,7 +238,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
         // 这里只给一个占位；用户必须改成自己 endpoint 的实际 id。
         model_fallback: 'doubao-seed-1-6-thinking',
         description: '火山方舟 (Coding Plan / Agent Plan / 按量付费)；model 字段需用户填实际 endpoint id',
-        mark: '火', color: '#DC2626', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: '火', color: '#DC2626', group: 'CODING PLAN', auth_prefix: 'sk-',
         category: 'coding_plan',
     },
     {
@@ -257,7 +259,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'hunyuan-t1-latest',
         },
         description: '腾讯混元 (Token Plan / TokenHub 按量)；OpenAI Chat 兼容',
-        mark: '混', color: '#0EA5E9', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: '混', color: '#0EA5E9', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -278,7 +280,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'ernie-x1-turbo-32k',
         },
         description: '百度千帆 / 文心一言 ERNIE（按量付费 / 中国订阅）',
-        mark: '千', color: '#3B82F6', group: '国内 Coding Plan', auth_prefix: 'bce-',
+        mark: '千', color: '#3B82F6', group: '三方模型', auth_prefix: 'bce-',
         category: 'third_party',
     },
     {
@@ -290,7 +292,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
         relay_protocol: 'chat_completions',
         model_fallback: 'glm-4.7',
         description: 'UCloud Modelverse (Coding Plan + 按量付费 国内/海外)；多模型聚合',
-        mark: 'U', color: '#0066FF', group: '国内 Coding Plan', auth_prefix: 'sk-',
+        mark: 'U', color: '#0066FF', group: 'CODING PLAN', auth_prefix: 'sk-',
         category: 'coding_plan',
     },
     {
@@ -310,7 +312,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'gpt-4o-mini': 'accounts/fireworks/models/llama-v3p1-8b-instruct',
         },
         description: 'Fireworks AI 海外高速推理（按量 / Fire Pass 国际订阅）；OpenAI Chat 兼容',
-        mark: 'FW', color: '#7C3AED', group: '海外 / 小众', auth_prefix: 'fw-',
+        mark: 'FW', color: '#7C3AED', group: '三方模型', auth_prefix: 'fw-',
         category: 'third_party',
     },
     {
@@ -331,7 +333,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'step-r-mini',
         },
         description: '阶跃星辰 step 系列 (按量付费 / 中国订阅 / 国际订阅)',
-        mark: 'St', color: '#0F766E', group: '海外 / 小众', auth_prefix: 'sk-',
+        mark: 'St', color: '#0F766E', group: '三方模型', auth_prefix: 'sk-',
         category: 'third_party',
     },
     {
@@ -344,7 +346,7 @@ export const RELAY_PRESETS: RelayPreset[] = [
         // OpenRouter 用 vendor/model 形式；不设兜底，让用户自己选
         model_fallback: 'openai/gpt-5.5',
         description: 'OpenRouter 聚合 500+ 模型；模型 id 形如 anthropic/claude-sonnet-4.6',
-        mark: 'OR', color: '#10B981', group: '海外 / 小众', auth_prefix: 'sk-or-',
+        mark: 'OR', color: '#10B981', group: '三方模型', auth_prefix: 'sk-or-',
         category: 'third_party',
     },
     {
