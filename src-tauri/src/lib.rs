@@ -4351,13 +4351,7 @@ pub fn run() {
             .append(true)
             .open(&log_path)
         {
-            use std::os::unix::io::IntoRawFd;
-            let fd = file.into_raw_fd();
-            unsafe {
-                libc::dup2(fd, 1);
-                libc::dup2(fd, 2);
-                libc::close(fd);
-            }
+            redirect_stdout_stderr_to_file(file);
             eprintln!(
                 "\n=== codex-switcher started {} pid={} ===",
                 chrono::Utc::now().to_rfc3339(),
@@ -4695,6 +4689,21 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(unix)]
+fn redirect_stdout_stderr_to_file(file: std::fs::File) {
+    use std::os::unix::io::IntoRawFd;
+
+    let fd = file.into_raw_fd();
+    unsafe {
+        libc::dup2(fd, 1);
+        libc::dup2(fd, 2);
+        libc::close(fd);
+    }
+}
+
+#[cfg(not(unix))]
+fn redirect_stdout_stderr_to_file(_file: std::fs::File) {}
 
 #[cfg(test)]
 mod tests {
