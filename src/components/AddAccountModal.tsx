@@ -732,7 +732,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                     ) : activeTab === 'relay' ? (
                         <div className="relay-panel">
                             <p className="modal-tip" style={{ marginBottom: 12 }}>
-                                选预设自动填 base_url，贴 sk-key 即可。也支持 <code>codexswitch://</code> deep link。
+                                选预设自动填 base_url，贴 API Key 即可。也支持 <code>codexswitch://</code> deep link。
                             </p>
 
                             <div className="relay-form-grid">
@@ -778,14 +778,14 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                             </div>
 
                             <div className="form-group">
-                                <label htmlFor="relay-key">API Key (sk-...) *</label>
+                                <label htmlFor="relay-key">API Key (sk-... / tp-...) *</label>
                                 <input
                                     id="relay-key"
                                     type="password"
                                     value={relayApiKey}
                                     onChange={e => setRelayApiKey(e.target.value)}
                                     disabled={relaySubmitting}
-                                    placeholder="sk-..."
+                                    placeholder="sk-... / tp-..."
                                     style={{ fontFamily: 'ui-monospace, Menlo, monospace' }}
                                 />
                             </div>
@@ -817,7 +817,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                     disabled={relaySubmitting}
                                 >
                                     <option value="responses">responses（默认 / Unity2、ChatGPT、OpenAI key）</option>
-                                    <option value="chat_completions">chat_completions（GLM Coding Plan / 通用 OpenAI Chat）</option>
+                                    <option value="chat_completions">chat_completions（GLM/MiMo Coding Plan / 通用 OpenAI Chat）</option>
                                 </select>
                             </div>
 

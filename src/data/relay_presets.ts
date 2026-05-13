@@ -1,7 +1,7 @@
 /**
  * 中转站 / OpenAI 兼容服务的预设列表。
  *
- * 选预设后会自动填 base_url + usage_preset，用户只需贴 sk-key。
+ * 选预设后会自动填 base_url + usage_preset，用户只需贴 API Key。
  *
  * `usage_preset` 字段命中后端 Rust 内置 fetcher 名（见 `usage.rs`）：
  *   - "openai_compat": GET {base}/v1/usage with Bearer
@@ -29,7 +29,7 @@ export interface RelayPreset {
     /**
      * 上游协议 wire format：
      * - "responses"（默认 / 不填 = 等价）—— 上游原生支持 codex /v1/responses（Unity2、ChatGPT 子集、OpenAI key）
-     * - "chat_completions" —— 上游只懂 /chat/completions（GLM Coding Plan / 通用 OpenAI Chat），proxy 翻译
+     * - "chat_completions" —— 上游只懂 /chat/completions（GLM/MiMo Coding Plan / 通用 OpenAI Chat），proxy 翻译
      */
     relay_protocol?: 'responses' | 'chat_completions';
 }
@@ -75,6 +75,26 @@ export const RELAY_PRESETS: RelayPreset[] = [
             'o1-mini': 'glm-5.1-x',
         },
         description: 'GLM Coding Plan（codex /v1/responses ↔ /chat/completions 翻译，内置）',
+    },
+    {
+        id: 'mimo_token_plan_sgp',
+        name: 'Xiaomi MiMo Token Plan',
+        // MiMo Token Plan 专属端点；官方文档说明 MiMo 暂不适配 Responses API，只适用于 Chat Completions。
+        base_url: 'https://token-plan-sgp.xiaomimimo.com/v1',
+        homepage: 'https://token-plan-sgp.xiaomimimo.com/docs',
+        usage_preset: null,
+        relay_protocol: 'chat_completions',
+        model_fallback: 'mimo-v2.5-pro',
+        model_map: {
+            'gpt-5.5': 'mimo-v2.5-pro',
+            'gpt-5': 'mimo-v2.5-pro',
+            'gpt-5-codex': 'mimo-v2.5-pro',
+            'gpt-4o': 'mimo-v2.5-pro',
+            'gpt-4o-mini': 'mimo-v2.5-pro',
+            'o1': 'mimo-v2.5-pro',
+            'o1-mini': 'mimo-v2.5-pro',
+        },
+        description: 'Xiaomi MiMo-V2.5 Token Plan（tp-key，Responses ↔ Chat Completions 翻译）',
     },
     {
         id: 'freemodel',
