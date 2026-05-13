@@ -372,6 +372,44 @@ export const RELAY_PRESETS: RelayPreset[] = [
         category: 'third_party',
     },
     {
+        id: 'aiberm',
+        name: 'Aiberm (按量付费聚合)',
+        // Aiberm 同时支持 OpenAI /v1/chat/completions 和 Anthropic /v1/messages，
+        // cc-router 走 Anthropic 路径，我们走 OpenAI 路径。
+        // 实际可用模型清单由 key 所属 token group 决定，需用 /v1/models 探测。
+        base_url: 'https://aiberm.com/v1',
+        homepage: 'https://aiberm.com',
+        usage_preset: null,
+        relay_protocol: 'chat_completions',
+        // 文档示例只给了 gpt-4 / gpt-3.5-turbo / claude-3-sonnet，
+        // 实际模型按 key 等级动态返回 —— 这里用 gpt-4o 作 fallback
+        model_fallback: 'gpt-4o',
+        description: 'Aiberm 全球聚合 API（OpenAI/Anthropic 双协议，模型按 token group 动态）',
+        mark: 'Ai', color: '#0EA5E9', group: '三方模型', auth_prefix: 'sk-',
+        category: 'third_party',
+    },
+    {
+        id: 'whatai',
+        name: '神马中转 API (Whatai)',
+        // Whatai 明确支持 OpenAI + Anthropic 双协议，cc-router 用 Anthropic，
+        // 我们用 OpenAI Chat Completions 路径。
+        base_url: 'https://api.whatai.cc/v1',
+        homepage: 'https://api.whatai.cc',
+        usage_preset: null,
+        relay_protocol: 'chat_completions',
+        model_fallback: 'chatgpt-4o-latest',
+        model_map: {
+            'gpt-5.5': 'chatgpt-4o-latest',
+            'gpt-5': 'chatgpt-4o-latest',
+            'gpt-5-codex': 'chatgpt-4o-latest',
+            'gpt-4o': 'gpt-4o',
+            'gpt-4o-mini': 'gpt-4o-mini',
+        },
+        description: '神马中转 API 全球按量付费聚合（OpenAI/Anthropic 双协议）',
+        mark: '神', color: '#F59E0B', group: '三方模型', auth_prefix: 'sk-',
+        category: 'third_party',
+    },
+    {
         id: 'modelscope',
         name: '魔搭 ModelScope',
         base_url: 'https://api-inference.modelscope.cn/v1',
