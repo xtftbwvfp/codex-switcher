@@ -115,6 +115,34 @@ body.is-tray-popup,
     color: #f59e0b;
 }
 
+/* ===== 手机锚状态条 ===== */
+.tp-anchor {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(99, 102, 241, 0.12) 100%);
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.78);
+}
+
+.tp-anchor.matched {
+    background: rgba(56, 189, 248, 0.08);
+    border-color: rgba(56, 189, 248, 0.18);
+}
+
+.tp-anchor-icon {
+    font-size: 13px;
+}
+
+.tp-anchor-text b {
+    color: #7dd3fc;
+    font-weight: 600;
+}
+
 /* ===== 卡片网格 ===== */
 .tp-cards {
     display: grid;

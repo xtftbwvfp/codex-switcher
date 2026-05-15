@@ -44,6 +44,8 @@ interface TrayData {
     proxy: ProxyStatus;
     tokens: TokenStats;
     next_account: { name: string; score: number } | null;
+    /** 当前 anchor 账号名（若有），current != anchor 时切号 disk 不动 */
+    anchor: { name: string; is_current: boolean } | null;
 }
 
 function formatCountdown(resetAt: number | null): string {
@@ -88,6 +90,7 @@ export function TrayPopup() {
             const accounts = await invoke<any[]>('get_accounts');
             const currentId = await invoke<string | null>('get_current_account_id');
             const account = currentId ? accounts.find((a: any) => a.id === currentId) : null;
+            const anchorAcc = accounts.find((a: any) => a.is_session_anchor);
 
             setData({
                 account: account ? {
@@ -100,6 +103,9 @@ export function TrayPopup() {
                 proxy,
                 tokens,
                 next_account: null, // Will be populated later
+                anchor: anchorAcc
+                    ? { name: anchorAcc.name, is_current: anchorAcc.id === currentId }
+                    : null,
             });
         } catch (e) {
             console.error('Failed to fetch tray data:', e);
@@ -186,6 +192,22 @@ export function TrayPopup() {
                     {data.account.is_banned && <span className="tp-banned">封号</span>}
                     {data.account.is_logged_out && !data.account.is_banned && <span className="tp-logged-out">登出</span>}
                     {data.account.is_token_invalid && !data.account.is_banned && !data.account.is_logged_out && <span className="tp-invalid">失效</span>}
+                </div>
+            )}
+
+            {/* Anchor 状态条：anchor != current 时显示"手机在 X，代理出口在 current"，帮用户秒懂当前 disk 锁在哪号 */}
+            {data?.anchor && !data.anchor.is_current && (
+                <div className="tp-anchor">
+                    <span className="tp-anchor-icon">📱</span>
+                    <span className="tp-anchor-text">
+                        手机锚 <b>{data.anchor.name}</b> · 代理出口 <b>{data.account?.name}</b>
+                    </span>
+                </div>
+            )}
+            {data?.anchor && data.anchor.is_current && (
+                <div className="tp-anchor matched">
+                    <span className="tp-anchor-icon">📱</span>
+                    <span className="tp-anchor-text">手机锚 = 当前号</span>
                 </div>
             )}
 

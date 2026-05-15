@@ -2,7 +2,7 @@
 //!
 //! 暴露所有 Tauri 命令供前端调用
 
-mod account;
+pub mod account;
 mod bulk_import;
 mod codex_sessions;
 mod deep_link;

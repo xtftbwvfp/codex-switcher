@@ -228,6 +228,22 @@
     color: #93c5fd;
 }
 
+/* 手机锚激活态：替换"disk 不一致"警告的设计语言 —— 蓝紫渐变贴近 anchor 按钮 */
+.sync-info-banner.anchor-active {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.10) 0%, rgba(99, 102, 241, 0.10) 100%);
+    border-color: rgba(56, 189, 248, 0.32);
+}
+
+.sync-info-banner.anchor-active .banner-text strong {
+    color: #7dd3fc;
+}
+
+.sync-info-banner.anchor-active .banner-text span,
+.sync-info-banner.anchor-active .banner-text b {
+    color: #38bdf8;
+    font-family: inherit;
+}
+
 .banner-content {
     display: flex;
     align-items: center;

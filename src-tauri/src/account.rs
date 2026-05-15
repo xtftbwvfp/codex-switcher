@@ -1192,7 +1192,7 @@ impl AccountStore {
         }
     }
 
-    /// 退出兜底：把 anchor 当前 auth_json **以真实 expires_at** 落盘。
+    /// 退出兜底：把 anchor 当前 auth_json **以 access_token JWT 的真实 exp** 落盘。
     ///
     /// 平时 `write_codex_auth_extended_expiry` 会把磁盘上的 expires_at 撒谎成
     /// +24h，让 Codex.app / codex CLI 永远不想自己 refresh（rt 单写者保持是
@@ -1200,14 +1200,27 @@ impl AccountStore {
     /// 序退出（graceful 或 panic），Codex.app 会拿着撒谎的 expires_at 继续用，
     /// 真 at 过期后手机 bridge 401 但 Codex.app 不知道该 refresh → 链路静默断。
     ///
-    /// 退出时调用本函数，让 Codex.app 立刻看到"该自己 refresh 了"：会丢一次
-    /// rt（codex-switcher 下次启动需要重新登录 anchor），但用户体验上避免了
-    /// "什么都没动手机就连不上"的诡异断线。属于用户明确同意的权衡。
+    /// v0.7.1 关键发现：OAuth response 的 `expires_in` 字段就是 86400 (24h)，
+    /// 跟我们撒谎值是同一个数字 —— 早期版本写"真实 exp"等于啥也没做。
+    /// 现在我们改成解 access_token JWT 的 `exp` claim（实测 OpenAI 给的 access
+    /// token 真实寿命 ~240h / 10 天），写到磁盘上让 Codex.app 看到"再过几天就
+    /// 该自己 refresh"，从而在 codex-switcher 死亡几天后还能触发 Codex.app
+    /// 自己 refresh（代价：rt 一次轮换，下次启动要重新登录 anchor，但避免了
+    /// 手机 bridge 静默断线）。
     pub fn restore_disk_real_expiry_for_anchor(&self) -> Result<bool, String> {
         let Some(anchor) = self.session_anchor() else {
             return Ok(false);
         };
-        Self::write_codex_auth(&anchor.to_codex_auth_value())?;
+        let mut auth = anchor.to_codex_auth_value();
+        if let Some(real_exp_iso) = extract_access_token_jwt_exp_iso(&auth) {
+            if let Some(tokens) = auth.get_mut("tokens").and_then(|v| v.as_object_mut()) {
+                tokens.insert(
+                    "expires_at".to_string(),
+                    serde_json::Value::String(real_exp_iso),
+                );
+            }
+        }
+        Self::write_codex_auth(&auth)?;
         Ok(true)
     }
 
@@ -1312,6 +1325,27 @@ impl AccountStore {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
     }
+}
+
+/// 从 `tokens.access_token` (JWT) 解出 `exp` claim 并转 RFC3339。
+/// 用于 v0.7.1 退出兜底：OpenAI 给的 access_token JWT 真实寿命 ~240h，
+/// 远大于 OAuth response 里 `expires_in: 86400` 字段，所以单独走 JWT 解码。
+fn extract_access_token_jwt_exp_iso(auth: &Value) -> Option<String> {
+    use base64::Engine;
+    let at = auth
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str())?;
+    let parts: Vec<&str> = at.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()?;
+    let claims: Value = serde_json::from_slice(&payload).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    chrono::DateTime::<chrono::Utc>::from_timestamp(exp, 0).map(|dt| dt.to_rfc3339())
 }
 
 /// 从 Python repr 格式的字符串中提取 token 值

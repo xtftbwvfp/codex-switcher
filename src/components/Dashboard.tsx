@@ -47,6 +47,17 @@ export function Dashboard({
     // 用户在 codex 中手动改了登录状态、或 disk 文件被外部进程改动这种边角场景。
     const isMismatched = !!(syncStatus && !syncStatus.is_synced);
     const isHarmless = isMismatched && proxyRunning;
+
+    // v0.7+ 手机锚生效场景：disk 故意"落后"于 current，但 disk 身份 = anchor，
+    // 这是 BY DESIGN 不是冲突。识别条件：有 anchor + anchor != current + disk 身份匹配 anchor。
+    const anchorAccount = accounts.find(a => a.is_session_anchor);
+    const anchorIsActiveLayer = !!(
+        anchorAccount &&
+        currentAccount &&
+        anchorAccount.id !== currentAccount.id &&
+        isMismatched &&
+        syncStatus?.matching_id === anchorAccount.id
+    );
     // 获取最佳账号推荐（配额最高的账号）
     const getBestAccount = () => {
         if (accounts.length === 0) return null;
@@ -68,8 +79,22 @@ export function Dashboard({
             {/* 统计卡片 */}
             <StatsBar accountCount={accounts.length} usage={usage} />
 
-            {/* 同步状态：proxy 在跑 → 仅信息提示；proxy 关 → 警告 */}
-            {syncStatus && !syncStatus.is_synced && (
+            {/* 手机锚生效：disk 锁定在 anchor，不显示警告而是 info 提示 */}
+            {anchorIsActiveLayer && anchorAccount && (
+                <div className="sync-info-banner anchor-active">
+                    <div className="banner-content">
+                        <span className="banner-icon">📱</span>
+                        <div className="banner-text">
+                            <strong>手机锚生效：</strong>
+                            Codex.app 仍以 <span>{anchorAccount.name}</span> 身份在线（手机 bridge 不掉线），
+                            代理出口已切到 <b>{currentAccount?.name}</b>。
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 旧的"磁盘落后/不一致"提示：anchor 生效时彻底隐藏（避免误导） */}
+            {syncStatus && !syncStatus.is_synced && !anchorIsActiveLayer && (
                 <div className={isHarmless ? 'sync-info-banner' : 'sync-warning-banner'}>
                     <div className="banner-content">
                         <span className="banner-icon">{isHarmless ? 'ℹ️' : '⚠️'}</span>
@@ -122,7 +147,7 @@ export function Dashboard({
                                 )}
                             </div>
 
-                            {isMismatched ? (
+                            {isMismatched && !anchorIsActiveLayer ? (
                                 <div className="mismatch-panel">
                                     <div className="mismatch-headline">
                                         与 ~/.codex/auth.json 身份不匹配
