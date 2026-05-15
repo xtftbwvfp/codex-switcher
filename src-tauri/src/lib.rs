@@ -2638,31 +2638,49 @@ async fn get_quota_by_id(
     };
 
     if is_current {
-        let official_auth = AccountStore::read_codex_auth()?;
-        let mut store = state.store.lock().map_err(|e| e.to_string())?;
-        let local_auth = store
-            .accounts
-            .get(&id)
-            .ok_or_else(|| format!("账号 {} 不存在", id))?
-            .auth_json
-            .clone();
+        // 手机锚模式（v0.7+）：disk 故意锁在 anchor 上，跟 current 身份不匹配是 BY DESIGN，
+        // 不该把这种状态当冲突。anchor != current 时整段 disk 校验/反向同步直接跳过 ——
+        // proxy 会按 store.current 的 token 路由 quota 请求，store 内本来就是权威值。
+        let anchor_owns_disk = {
+            let store = state.store.lock().map_err(|e| e.to_string())?;
+            store
+                .session_anchor_id()
+                .map(|aid| aid != id)
+                .unwrap_or(false)
+        };
 
-        if !AccountStore::auth_identity_matches(&local_auth, &official_auth) {
-            return Err(
-                "当前激活账号与 ~/.codex/auth.json 身份不匹配，已拒绝覆盖，请先在 Codex 中切回同一账号".to_string(),
-            );
-        }
-
-        if local_auth != official_auth {
+        if anchor_owns_disk {
             println!(
-                "[Quota] 当前激活账号 {}：检测到官方 auth.json 变更，按权威源同步。",
+                "[Quota] 手机锚生效，disk 归 anchor，跳过 current({}) 的 disk 一致性校验",
                 id
             );
-            if store.sync_account_from_auth_json(&id, official_auth) {
-                store.save()?;
-            }
         } else {
-            println!("[Quota] 当前激活账号 {}：已与官方 auth.json 保持一致。", id);
+            let official_auth = AccountStore::read_codex_auth()?;
+            let mut store = state.store.lock().map_err(|e| e.to_string())?;
+            let local_auth = store
+                .accounts
+                .get(&id)
+                .ok_or_else(|| format!("账号 {} 不存在", id))?
+                .auth_json
+                .clone();
+
+            if !AccountStore::auth_identity_matches(&local_auth, &official_auth) {
+                return Err(
+                    "当前激活账号与 ~/.codex/auth.json 身份不匹配，已拒绝覆盖，请先在 Codex 中切回同一账号".to_string(),
+                );
+            }
+
+            if local_auth != official_auth {
+                println!(
+                    "[Quota] 当前激活账号 {}：检测到官方 auth.json 变更，按权威源同步。",
+                    id
+                );
+                if store.sync_account_from_auth_json(&id, official_auth) {
+                    store.save()?;
+                }
+            } else {
+                println!("[Quota] 当前激活账号 {}：已与官方 auth.json 保持一致。", id);
+            }
         }
     }
 
@@ -4284,6 +4302,19 @@ fn sync_active_with_disk(state: State<AppState>, app: tauri::AppHandle) -> Resul
     let disk_auth = AccountStore::read_codex_auth()?;
     let disk_email = AccountStore::extract_email(&disk_auth);
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
+
+    // 手机锚模式（v0.7+）：disk 故意锁在 anchor 上，"按 disk 对齐 current" 等于
+    // 把 current 强拉回 anchor —— 破坏整个 anchor 设计的目的。直接拒绝。
+    // 用户想换 anchor 应该走 set_session_anchor，想离开 anchor 模式应该先取消 anchor。
+    if let Some(anchor_id) = store.session_anchor_id() {
+        if store.current.as_deref() != Some(anchor_id.as_str()) {
+            return Err(
+                "手机锚生效中：disk 是 anchor 的镜像，不能用它对齐 current。\
+                 想离开 anchor 模式请先在 anchor 账号上点 📱 按钮取消"
+                    .to_string(),
+            );
+        }
+    }
 
     // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
     let matching_id = disk_email
