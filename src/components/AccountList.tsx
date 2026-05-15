@@ -569,7 +569,10 @@ export function AccountList({
                                 </div>
                                 <div className="col-actions">
                                     <button className="action-btn refresh" onClick={() => handleRefreshOne(acc.id)} disabled={isRefreshing} title="刷新"><RefreshCw size={14} className={isRefreshing ? 'spinning' : ''} /></button>
-                                    {onSetSessionAnchor && (
+                                    {/* 手机锚只对 ChatGPT 订阅号开放：
+                                        Codex.app `/codex/remote/control/*` 必须用 chatgpt_account_id 鉴权，
+                                        Relay / OpenAI API key 没有这个 claim，设了也是给 Codex.app 喂垃圾 */}
+                                    {onSetSessionAnchor && effectiveKind(acc) === 'chatgpt_oauth' && (
                                         <button
                                             className={`action-btn anchor ${acc.is_session_anchor ? 'on' : ''}`}
                                             onClick={() => onSetSessionAnchor(acc.id, !acc.is_session_anchor)}

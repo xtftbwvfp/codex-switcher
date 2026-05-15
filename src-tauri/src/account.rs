@@ -1149,9 +1149,21 @@ impl AccountStore {
     /// 把指定账号设为手机锚（同时清空其他账号的 anchor 标记）；
     /// `enabled = false` 时只是取消该账号的 anchor，整体回退到"无 anchor"状态。
     /// 不在此处写 auth.json —— 调用方决定是否触发盘面同步。
+    ///
+    /// **只允许 ChatGPT 订阅号当 anchor**：Codex.app `/codex/remote/control/*`
+    /// 强制要求请求里带 `chatgpt_account_id` claim，Relay / OpenAI API key 没有
+    /// 这个 claim，硬设了只会让 Codex.app 拿 anchor 的"假" auth.json 时把请求
+    /// 头里的 chatgpt_account_id 塞空，手机 bridge enroll 立刻失败。
     pub fn set_session_anchor(&mut self, id: &str, enabled: bool) -> Result<(), String> {
-        if !self.accounts.contains_key(id) {
-            return Err(format!("账号不存在: {}", id));
+        let account = self
+            .accounts
+            .get(id)
+            .ok_or_else(|| format!("账号不存在: {}", id))?;
+        if enabled && !account.is_chatgpt_oauth() {
+            return Err(
+                "手机锚只能设在 ChatGPT 订阅号上（Relay / OpenAI API key 不带 chatgpt_account_id，Codex.app 手机 bridge 无法鉴权）"
+                    .to_string(),
+            );
         }
         if enabled {
             // 互斥：先清其他，再开当前
