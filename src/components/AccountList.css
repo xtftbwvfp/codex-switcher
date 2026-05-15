@@ -401,6 +401,14 @@
     cursor: help;
 }
 
+/* 手机锚 badge：与 .current 区分开但同样醒目 */
+.badge.anchor {
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.25) 0%, rgba(99, 102, 241, 0.25) 100%);
+    color: #7dd3fc;
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    cursor: help;
+}
+
 .badge.copy-success {
     background: rgba(88, 166, 255, 0.2);
     color: var(--primary-color);
@@ -666,6 +674,19 @@
     background: rgba(248, 81, 73, 0.15);
     border-color: rgba(248, 81, 73, 0.5);
     color: var(--danger-color);
+}
+
+.action-btn.anchor:hover:not(:disabled) {
+    background: rgba(56, 189, 248, 0.15);
+    border-color: rgba(56, 189, 248, 0.5);
+    color: #7dd3fc;
+}
+
+/* 已开启 anchor 时常驻高亮，与"点击切换"图标按钮区分 */
+.action-btn.anchor.on {
+    background: rgba(56, 189, 248, 0.22);
+    border-color: rgba(56, 189, 248, 0.6);
+    color: #38bdf8;
 }
 
 /* 图标样式 */

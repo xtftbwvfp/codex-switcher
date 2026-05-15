@@ -76,6 +76,12 @@ fn detect_sync_conflict_for_current(
     None
 }
 
+/// 全局 store 句柄，供 panic_hook / 退出兜底使用（panic hook 拿不到 Tauri 的
+/// `State`，所以只能借这条侧通道）。在 `AppState::new()` 里写一次。
+static GLOBAL_STORE_FOR_EXIT: std::sync::OnceLock<
+    std::sync::Arc<std::sync::Mutex<AccountStore>>,
+> = std::sync::OnceLock::new();
+
 /// 应用状态
 pub struct AppState {
     pub store: std::sync::Arc<std::sync::Mutex<AccountStore>>,
@@ -98,8 +104,13 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        let store = std::sync::Arc::new(std::sync::Mutex::new(AccountStore::load()));
+        // 注册到全局侧通道，供 panic hook / RunEvent::Exit 在 Tauri State 不可达
+        // 的位置使用。第二次调用会被忽略（OnceLock 语义）—— 多实例非预期场景下
+        // 也只会保留第一份。
+        let _ = GLOBAL_STORE_FOR_EXIT.set(store.clone());
         Self {
-            store: std::sync::Arc::new(std::sync::Mutex::new(AccountStore::load())),
+            store,
             scheduler: std::sync::Mutex::new(None),
             proxy_handle: std::sync::Mutex::new(None),
             proxy_stats: std::sync::Arc::new(proxy::ProxyStats::default()),
@@ -561,6 +572,58 @@ fn set_account_inactive_refresh_enabled(
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     store.set_inactive_refresh_enabled(&id, enabled)?;
     store.save()?;
+    Ok(())
+}
+
+/// 设置 / 取消 手机锚账号（Codex.app 手机远程连接绑定）。
+///
+/// 副作用：
+/// - 开启时：立刻把该账号的 auth_json 写盘到 `~/.codex/auth.json`（让 Codex.app 看到 anchor 身份）
+/// - 关闭时：把"当前 current"账号的 auth_json 写盘（回到旧的"current = disk"语义）
+///
+/// 后台 scheduler 的 anchor refresh tick 会接管之后的 token 保活。
+#[tauri::command]
+fn set_session_anchor(
+    state: State<AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let (disk_auth, anchor_after, action) = {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        store.set_session_anchor(&id, enabled)?;
+        store.save()?;
+
+        // 决定本次该把哪个账号写盘
+        let after = store.session_anchor_id();
+        if enabled {
+            // 设为 anchor → 立刻把 anchor 的 auth_json 落盘
+            let acc = store
+                .accounts
+                .get(&id)
+                .ok_or_else(|| format!("账号不存在: {}", id))?;
+            (Some(acc.to_codex_auth_value()), after, "set")
+        } else {
+            // 取消 anchor → 把当前 current 写盘（无 current 则跳过）
+            let candidate = store
+                .current
+                .clone()
+                .and_then(|cid| store.accounts.get(&cid).map(|a| a.to_codex_auth_value()));
+            (candidate, after, "clear")
+        }
+    };
+
+    if let Some(auth) = disk_auth {
+        AccountStore::write_codex_auth(&auth)?;
+        println!(
+            "[Anchor] {} 完成；当前 anchor = {:?}",
+            action, anchor_after
+        );
+    } else {
+        println!("[Anchor] {} 完成，但无可写盘的候选账号", action);
+    }
+
+    // 切了 anchor 等于换了磁盘上的 chatgpt_account_id，proxy 远端 token 缓存必须失效
+    crate::proxy::invalidate_remote_token_cache();
     Ok(())
 }
 
@@ -1748,11 +1811,21 @@ pub async fn do_one_fast_auth_sync(store: &std::sync::Arc<std::sync::Mutex<Accou
     // 2) 拉 cid 的最新 token 写盘
     match remote_client::fetch_token(&base, &secret, &cid).await {
         Ok(t) => {
-            if let Ok(mut s) = store.lock() {
+            let allow_disk = {
+                let mut s = match store.lock() {
+                    Ok(g) => g,
+                    Err(_) => return false,
+                };
                 s.sync_account_from_auth_json(&cid, t.auth_json.clone());
                 // 把本机 current 也对齐上（如果之前不一致）
                 s.current = Some(cid.clone());
                 let _ = s.save();
+                s.should_write_disk_for(&cid)
+            };
+            if !allow_disk {
+                println!("[FastAuthSync] 手机锚生效，跳过写 ~/.codex/auth.json（current != anchor）");
+                crate::proxy::invalidate_remote_token_cache();
+                return true;
             }
             // 扩展 expires_at 到 +24h，codex CLI 看到"很新鲜"就不会自己 refresh，
             // 真过期时 proxy 这边接管处理
@@ -1959,7 +2032,7 @@ pub fn start_quota_refresh(
                                             .await
                                             {
                                                 Ok(t) => {
-                                                    if let Ok(mut s) = store.lock() {
+                                                    let allow_disk = if let Ok(mut s) = store.lock() {
                                                         s.sync_account_from_auth_json(
                                                             &cid,
                                                             t.auth_json.clone(),
@@ -1975,13 +2048,21 @@ pub fn start_quota_refresh(
                                                                 cur.name.clone().unwrap_or_default()
                                                             );
                                                         }
-                                                    }
-                                                    // client 模式：用 extended_expiry 防 codex 自刷
-                                                    if let Err(e) =
+                                                        s.should_write_disk_for(&cid)
+                                                    } else {
+                                                        true
+                                                    };
+                                                    if !allow_disk {
+                                                        println!(
+                                                            "[QuotaRefresh] 手机锚生效，跳过写 ~/.codex/auth.json（{} != anchor）",
+                                                            cur.name.clone().unwrap_or_default()
+                                                        );
+                                                    } else if let Err(e) =
                                                         account::AccountStore::write_codex_auth_extended_expiry(
                                                             &t.auth_json,
                                                         )
                                                     {
+                                                        // client 模式：用 extended_expiry 防 codex 自刷
                                                         eprintln!(
                                                             "[QuotaRefresh] 写 ~/.codex/auth.json 失败: {}",
                                                             e
@@ -4420,12 +4501,22 @@ async fn remote_pull_all_tokens(
         (None, None)
     };
     if let Some(cid) = cur_id.as_ref() {
-        let auth_opt = {
+        let (auth_opt, allow_disk) = {
             let store = state.store.lock().map_err(|e| e.to_string())?;
-            store.accounts.get(cid).map(|a| a.auth_json.clone())
+            (
+                store.accounts.get(cid).map(|a| a.auth_json.clone()),
+                store.should_write_disk_for(cid),
+            )
         };
         if let Some(auth) = auth_opt {
-            if let Err(e) = account::AccountStore::write_codex_auth(&auth) {
+            if !allow_disk {
+                // 手机锚生效：不覆盖 anchor 的磁盘镜像，只对齐 current
+                if let Ok(mut store) = state.store.lock() {
+                    store.current = Some(cid.clone());
+                    let _ = store.save();
+                }
+                println!("[RemotePull] 手机锚生效，跳过写 ~/.codex/auth.json（current={} != anchor）", cid);
+            } else if let Err(e) = account::AccountStore::write_codex_auth(&auth) {
                 errors.push((cid.clone(), format!("写 auth.json 失败: {}", e)));
             } else {
                 wrote_auth_json = true;
@@ -4606,6 +4697,25 @@ fn remote_restart_server(state: State<AppState>, app: tauri::AppHandle) -> Resul
 // ==================== end Remote Mode commands ====================
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 退出兜底：把 anchor 的磁盘 expires_at 从撒谎的 +24h 恢复成真实值。
+/// 详见 `AccountStore::restore_disk_real_expiry_for_anchor` 注释。
+fn restore_anchor_disk_on_exit(reason: &str) {
+    let Some(store) = GLOBAL_STORE_FOR_EXIT.get() else {
+        return;
+    };
+    let Ok(guard) = store.lock() else {
+        return;
+    };
+    match guard.restore_disk_real_expiry_for_anchor() {
+        Ok(true) => eprintln!(
+            "[{}] 已恢复 ~/.codex/auth.json 真实 expires_at（anchor 释放给 Codex.app）",
+            reason
+        ),
+        Ok(false) => {}
+        Err(e) => eprintln!("[{}] anchor expires_at 恢复失败: {}", reason, e),
+    }
+}
+
 pub fn run() {
     // 把 stdout/stderr 重定向到 ~/.codex-switcher/proxy.log
     // 兼容 GUI 启动（Mac App double-click / Tauri build），让所有 println! / eprintln! 落盘
@@ -4626,6 +4736,13 @@ pub fn run() {
             );
         }
     }
+
+    // panic 兜底：跟 RunEvent::Exit 走同一条恢复路径
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_anchor_disk_on_exit("Panic");
+        prev_hook(info);
+    }));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -4828,6 +4945,12 @@ pub fn run() {
             // 快速 auth.json 同步循环（client 模式专用，但循环内自检模式，可以无脑启动）
             let _fast_auth_handle = start_fast_auth_sync(state.store.clone());
 
+            // 手机锚保活循环（无 anchor 时空转，不影响无该功能的用户）
+            let _anchor_handle = scheduler::start_anchor_refresh(
+                state.store.clone(),
+                app.handle().clone(),
+            );
+
             // client 模式下 server_url 空 → 用户配置错位，明确警告
             if let Ok(s) = state.store.lock() {
                 if s.settings.remote_mode == "client"
@@ -4889,6 +5012,7 @@ pub fn run() {
             update_account,
             update_relay_usage_cookie,
             set_account_inactive_refresh_enabled,
+            set_session_anchor,
             export_accounts,
             import_accounts,
             add_relay_account,
@@ -4962,8 +5086,16 @@ pub fn run() {
             remote_sync_skills,
             remote_restart_server,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // 退出兜底：把 anchor 的 expires_at 在磁盘上恢复成真实值，
+            // 让 Codex.app 在 codex-switcher 死掉之后能自己 refresh（而不是
+            // 拿着撒谎的 +24h expires_at 继续用导致手机 bridge 静默 401）。
+            if matches!(event, tauri::RunEvent::Exit) {
+                restore_anchor_disk_on_exit("Exit");
+            }
+        });
 }
 
 #[cfg(unix)]

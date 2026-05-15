@@ -39,6 +39,7 @@ function App() {
     checkSyncConflict,
     getSyncStatus,
     syncActiveWithDisk,
+    setSessionAnchor,
   } = useAccounts();
 
   const {
@@ -438,6 +439,7 @@ function App() {
             onAddRelay={() => setShowRelayModal(true)}
             onRefreshUsage={refreshUsage}
             usageLoading={usageLoading}
+            onSetSessionAnchor={setSessionAnchor}
           />
         ) : currentPage === 'proxy' ? (
           <Proxy />

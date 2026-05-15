@@ -75,6 +75,8 @@ export interface Account {
     relay_protocol?: string | null;
     /** 业务分类：aggregator (中转) / coding_plan / third_party (API) */
     relay_category?: 'aggregator' | 'coding_plan' | 'third_party' | null;
+    /** 手机锚（Codex.app 手机远程连接绑定）。整个 store 强约束最多一个 true。 */
+    is_session_anchor?: boolean;
 }
 
 /** 解析有效 kind：与 Rust 端 `Account::effective_kind()` 行为一致
@@ -132,6 +134,18 @@ export function useAccounts() {
         try {
             setError(null);
             await invoke('set_account_inactive_refresh_enabled', { id, enabled });
+            await loadData();
+        } catch (err) {
+            setError(String(err));
+            throw err;
+        }
+    }, [loadData]);
+
+    // 设置 / 取消 手机锚（互斥：整个 store 最多一个 anchor）
+    const setSessionAnchor = useCallback(async (id: string, enabled: boolean) => {
+        try {
+            setError(null);
+            await invoke('set_session_anchor', { id, enabled });
             await loadData();
         } catch (err) {
             setError(String(err));
@@ -292,6 +306,7 @@ export function useAccounts() {
         reloadIdeWindows,
         updateSettings,
         setInactiveRefreshEnabled,
+        setSessionAnchor,
         checkSyncConflict: useCallback(async () => {
             return invoke<string | null>('check_sync_conflict');
         }, []),

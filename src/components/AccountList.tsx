@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Zap, RefreshCw, ArrowLeftRight, Trash2, Clock, UploadCloud, Plus, Gauge } from 'lucide-react';
+import { Zap, RefreshCw, ArrowLeftRight, Trash2, Clock, UploadCloud, Plus, Gauge, Smartphone } from 'lucide-react';
 import { Account, AppSettings, RelayUsageCache, effectiveKind } from '../hooks/useAccounts';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -54,6 +54,7 @@ interface AccountListProps {
     onAddRelay?: () => void;
     onRefreshUsage?: () => void;
     usageLoading?: boolean;
+    onSetSessionAnchor?: (id: string, enabled: boolean) => Promise<void>;
 }
 
 export function AccountList({
@@ -68,6 +69,7 @@ export function AccountList({
     onDelete,
     onUpdateSettings,
     onRefreshComplete,
+    onSetSessionAnchor,
 }: AccountListProps) {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
@@ -535,6 +537,12 @@ export function AccountList({
                                         })()}
                                         {copiedId === acc.id && <span className="badge copy-success">已复制</span>}
                                         {isCurrent && <span className="badge current">当前</span>}
+                                        {acc.is_session_anchor && (
+                                            <span
+                                                className="badge anchor"
+                                                title="手机锚：磁盘 ~/.codex/auth.json 永远跟随此号，Codex.app 手机远程连接绑定此号；切到其他号时 disk 不动、proxy 出口照切"
+                                            >📱 手机锚</span>
+                                        )}
                                         {isBanned ? <span className="badge banned" title="该账号已被 OpenAI 封禁">封号</span> : isLoggedOut ? <span className="badge logged-out" title="您已登出或登录了其他账号，请重新登录">已登出</span> : isInvalid && <span className="badge expired" title="该账号 Token 已过期或失效">过期</span>}
                                         {usage?.plan_type && <span className="badge plan">{usage.plan_type.toUpperCase()}</span>}
                                     </div>
@@ -561,6 +569,17 @@ export function AccountList({
                                 </div>
                                 <div className="col-actions">
                                     <button className="action-btn refresh" onClick={() => handleRefreshOne(acc.id)} disabled={isRefreshing} title="刷新"><RefreshCw size={14} className={isRefreshing ? 'spinning' : ''} /></button>
+                                    {onSetSessionAnchor && (
+                                        <button
+                                            className={`action-btn anchor ${acc.is_session_anchor ? 'on' : ''}`}
+                                            onClick={() => onSetSessionAnchor(acc.id, !acc.is_session_anchor)}
+                                            title={acc.is_session_anchor
+                                                ? '点击取消手机锚（disk auth.json 回到跟随 current 的旧行为）'
+                                                : '设为手机锚：disk auth.json 永远跟此号走，切到其他号时 Codex.app 仍以此号身份在线，手机 bridge 不掉线'}
+                                        >
+                                            <Smartphone size={14} />
+                                        </button>
+                                    )}
                                     {settings.remote_mode === 'client' && (
                                         <button
                                             className="action-btn push"

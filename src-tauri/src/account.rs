@@ -384,6 +384,24 @@ pub struct Account {
     /// 老账号没这个字段；启动加载时按 `notes`（`from preset:<id>`）反推一次性 migrate。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_category: Option<String>,
+
+    /// **手机锚（Codex.app 手机远程连接绑定）**
+    ///
+    /// 整个 store 强约束最多一个 `true`。设为 true 后：
+    /// - `~/.codex/auth.json` 永远是这个号的 tokens（无视 `current` 是谁）
+    /// - 切到非 anchor 账号时**不写盘**（避免把 anchor 的 chatgpt_account_id 替换掉
+    ///   导致 Codex.app `/codex/remote/control/*` 鉴权 `account_user_id !==`
+    ///   校验失败、手机 bridge 断线）
+    /// - scheduler 独立 tick 后台保活，确保 anchor 的 access_token 永不过期
+    ///
+    /// 不参与跨机同步（每台 Mac 自己的 anchor 独立；Secure Enclave 设备私钥本就
+    /// 绑死单机，跨机同步该字段无意义）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_session_anchor: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Account {
@@ -978,6 +996,7 @@ impl AccountStore {
             relay_model_fallback: None,
             relay_protocol: None,
             relay_category: None,
+            is_session_anchor: false,
         };
 
         self.accounts.insert(id.clone(), account.clone());
@@ -1042,6 +1061,7 @@ impl AccountStore {
             relay_model_fallback: model_fallback,
             relay_protocol,
             relay_category,
+            is_session_anchor: false,
         };
 
         self.accounts.insert(id.clone(), account.clone());
@@ -1062,7 +1082,15 @@ impl AccountStore {
     ///
     /// 现在 always 写 disk：写盘几毫秒 IO 几乎免费，但能保证 store ↔ disk 永远一致。
     /// `hot` 参数保留但不再影响行为，避免改太多调用点。
+    ///
+    /// **手机锚例外（v0.7+）**：当集群存在 anchor 且目标 != anchor 时，
+    /// disk 永远保持 anchor 的 auth.json 不动 —— 这样 Codex.app 看到的
+    /// `chatgpt_account_id` 永远是 anchor 那个号，手机 ↔ Mac 的 WS bridge
+    /// 不掉线；proxy 出口侧仍然按 `store.current` 路由到目标号。
     pub fn switch_to(&mut self, id: &str, _hot_legacy: bool) -> Result<(), String> {
+        let anchor_id = self.session_anchor_id();
+        let target_is_anchor = anchor_id.as_deref() == Some(id);
+
         let account = self
             .accounts
             .get_mut(id)
@@ -1071,9 +1099,19 @@ impl AccountStore {
         account.last_used = Some(Utc::now());
 
         println!("正在切换账号: {}", id);
-        // Relay 走 ApiKey schema，订阅号走原 OAuth schema —— 见 to_codex_auth_value 注释。
-        Self::write_codex_auth(&account.to_codex_auth_value())?;
-        println!("账号切换成功: auth.json 已更新");
+        if anchor_id.is_some() && !target_is_anchor {
+            // anchor 模式 + 切到非 anchor：跳过写 auth.json，让 Codex.app 仍以 anchor 身份在线。
+            println!(
+                "[Switch] 手机锚生效（anchor={}），目标 {} 非 anchor → 跳过写 auth.json",
+                anchor_id.as_deref().unwrap_or("?"),
+                id,
+            );
+        } else {
+            // 无 anchor 或切回 anchor 自身：照旧落盘。
+            // Relay 走 ApiKey schema，订阅号走原 OAuth schema —— 见 to_codex_auth_value 注释。
+            Self::write_codex_auth(&account.to_codex_auth_value())?;
+            println!("账号切换成功: auth.json 已更新");
+        }
 
         self.current = Some(id.to_string());
         Ok(())
@@ -1093,6 +1131,72 @@ impl AccountStore {
         }
 
         Ok(())
+    }
+
+    /// 获取当前手机锚账号 ID（最多一个）
+    pub fn session_anchor_id(&self) -> Option<String> {
+        self.accounts
+            .values()
+            .find(|a| a.is_session_anchor)
+            .map(|a| a.id.clone())
+    }
+
+    /// 获取当前手机锚账号引用
+    pub fn session_anchor(&self) -> Option<&Account> {
+        self.accounts.values().find(|a| a.is_session_anchor)
+    }
+
+    /// 把指定账号设为手机锚（同时清空其他账号的 anchor 标记）；
+    /// `enabled = false` 时只是取消该账号的 anchor，整体回退到"无 anchor"状态。
+    /// 不在此处写 auth.json —— 调用方决定是否触发盘面同步。
+    pub fn set_session_anchor(&mut self, id: &str, enabled: bool) -> Result<(), String> {
+        if !self.accounts.contains_key(id) {
+            return Err(format!("账号不存在: {}", id));
+        }
+        if enabled {
+            // 互斥：先清其他，再开当前
+            for acc in self.accounts.values_mut() {
+                if acc.id != id {
+                    acc.is_session_anchor = false;
+                }
+            }
+            if let Some(acc) = self.accounts.get_mut(id) {
+                acc.is_session_anchor = true;
+            }
+        } else if let Some(acc) = self.accounts.get_mut(id) {
+            acc.is_session_anchor = false;
+        }
+        Ok(())
+    }
+
+    /// 给定账号是否被允许覆盖磁盘 `~/.codex/auth.json`。
+    /// - 无 anchor → 任何账号都可以写盘（旧行为）
+    /// - 有 anchor 且 id == anchor → true
+    /// - 有 anchor 且 id != anchor → false（跳过写盘，保留 anchor 的磁盘镜像）
+    pub fn should_write_disk_for(&self, account_id: &str) -> bool {
+        match self.session_anchor_id() {
+            None => true,
+            Some(anchor_id) => anchor_id == account_id,
+        }
+    }
+
+    /// 退出兜底：把 anchor 当前 auth_json **以真实 expires_at** 落盘。
+    ///
+    /// 平时 `write_codex_auth_extended_expiry` 会把磁盘上的 expires_at 撒谎成
+    /// +24h，让 Codex.app / codex CLI 永远不想自己 refresh（rt 单写者保持是
+    /// codex-switcher）。这条不变量只在 codex-switcher 活着时有效——一旦本程
+    /// 序退出（graceful 或 panic），Codex.app 会拿着撒谎的 expires_at 继续用，
+    /// 真 at 过期后手机 bridge 401 但 Codex.app 不知道该 refresh → 链路静默断。
+    ///
+    /// 退出时调用本函数，让 Codex.app 立刻看到"该自己 refresh 了"：会丢一次
+    /// rt（codex-switcher 下次启动需要重新登录 anchor），但用户体验上避免了
+    /// "什么都没动手机就连不上"的诡异断线。属于用户明确同意的权衡。
+    pub fn restore_disk_real_expiry_for_anchor(&self) -> Result<bool, String> {
+        let Some(anchor) = self.session_anchor() else {
+            return Ok(false);
+        };
+        Self::write_codex_auth(&anchor.to_codex_auth_value())?;
+        Ok(true)
     }
 
     /// 更新账号信息

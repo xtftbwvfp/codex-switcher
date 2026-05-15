@@ -3,6 +3,9 @@
 //! 策略：
 //! - 当前账号：仅按官方 auth.json 回流同步，不主动 refresh
 //! - 非活跃账号：由 Switcher 独占执行保活 refresh，并原子回写账号库
+//! - 手机锚账号 (v0.7+)：独立 4 min tick，无论 current 是谁都强保活，且把
+//!   刷新出来的 token 落盘到 `~/.codex/auth.json`（用 +24h 撒谎 expires_at 让
+//!   Codex.app 永远不会自己 refresh，rt 单写者就是本程序）
 
 use crate::account::AccountStore;
 use crate::oauth;
@@ -10,6 +13,12 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use tokio::time::Duration;
+
+/// anchor 刷新间隔：4 分钟。
+///
+/// OpenAI access_token 真实寿命大约 10 min，4 min 留 2.5 倍安全余量。
+/// 比这个再短意义不大（rt 旋转有限），更长则不安全。
+const ANCHOR_REFRESH_INTERVAL_SECS: u64 = 4 * 60;
 
 #[derive(Debug, Clone)]
 struct RefreshTarget {
@@ -225,6 +234,143 @@ pub fn start(
             }
 
             tokio::time::sleep(Duration::from_secs(u64::from(interval_minutes) * 60)).await;
+        }
+    })
+}
+
+/// 启动手机锚专用刷新循环（v0.7+）。
+///
+/// **职责**：把 anchor 账号的 access_token / refresh_token 保活，并把刷新结果
+/// 原子写盘到 `~/.codex/auth.json`（带 +24h 撒谎 expires_at 字段，让
+/// Codex.app 和 codex CLI 都不会自己主动 refresh，rt 旋转的单写者就是这里）。
+///
+/// **触发条件**：store 里存在 `is_session_anchor = true` 的账号。无 anchor 时此 tick 空转。
+///
+/// **与 main scheduler 关系**：互不阻塞、互不重复。
+/// - main scheduler 用 `should_refresh_inactive_account`（天级粒度），不适合 anchor
+/// - anchor 这里强制 4 min 跑一次；如果 anchor == current 且 main scheduler 也想刷，
+///   `oauth::refresh_access_token` 是幂等可重入的（每次都拿新 rt），这里抢到先就给它写
+/// - remote_mode == "client" 时跳过：disk 由 `start_fast_auth_sync` 从 Server 拉
+pub fn start_anchor_refresh(
+    store: Arc<Mutex<AccountStore>>,
+    app_handle: tauri::AppHandle,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        println!("✅ 手机锚保活循环已启动（4 min 间隔，无 anchor 时空转）");
+        loop {
+            tokio::time::sleep(Duration::from_secs(ANCHOR_REFRESH_INTERVAL_SECS)).await;
+
+            // 1) 取 anchor 信息 + 模式
+            let (anchor_id, anchor_name, anchor_rt, remote_mode) = {
+                let store = match store.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                let mode = store.settings.remote_mode.clone();
+                match store.session_anchor() {
+                    Some(acc) => {
+                        let rt = acc
+                            .refresh_token
+                            .clone()
+                            .or_else(|| AccountStore::extract_refresh_token(&acc.auth_json));
+                        (Some(acc.id.clone()), acc.name.clone(), rt, mode)
+                    }
+                    None => (None, String::new(), None, mode),
+                }
+            };
+
+            let Some(anchor_id) = anchor_id else {
+                // 没设 anchor，空转
+                continue;
+            };
+
+            if remote_mode == "client" {
+                // client 模式：disk 由 Server 通过 fast_auth_sync 拉，本机不抢 rt
+                continue;
+            }
+
+            let Some(rt) = anchor_rt else {
+                eprintln!(
+                    "[AnchorRefresh] anchor 账号 {} 缺 refresh_token，无法保活（需要重新登录）",
+                    anchor_name
+                );
+                continue;
+            };
+
+            // 2) 刷新 token
+            match oauth::refresh_access_token(&rt).await {
+                Ok(tokens) => {
+                    // 3a) 写回 store
+                    let auth_value = {
+                        let mut store = match store.lock() {
+                            Ok(g) => g,
+                            Err(_) => continue,
+                        };
+                        let Some(account) = store.accounts.get_mut(&anchor_id) else {
+                            continue;
+                        };
+                        // 校验 anchor 标记还在（用户可能在 tick 期间取消了 anchor）
+                        if !account.is_session_anchor {
+                            println!(
+                                "[AnchorRefresh] {} 已不是 anchor（用户中途取消），跳过写盘",
+                                anchor_name
+                            );
+                            continue;
+                        }
+                        AccountStore::apply_refreshed_tokens(
+                            account,
+                            tokens.access_token,
+                            tokens.refresh_token,
+                            tokens.id_token,
+                            tokens.expires_in,
+                        );
+                        let v = account.to_codex_auth_value();
+                        let _ = store.save();
+                        v
+                    };
+
+                    // 3b) 写盘（extended_expiry 防 Codex.app 自刷）
+                    if let Err(e) =
+                        AccountStore::write_codex_auth_extended_expiry(&auth_value)
+                    {
+                        eprintln!("[AnchorRefresh] 写 ~/.codex/auth.json 失败: {}", e);
+                    } else {
+                        println!(
+                            "[AnchorRefresh] ✅ anchor {} 保活成功 + 已落盘",
+                            anchor_name
+                        );
+                    }
+                    crate::proxy::invalidate_remote_token_cache();
+                }
+                Err(reason) => {
+                    eprintln!(
+                        "[AnchorRefresh] ❌ anchor {} 保活失败: {}",
+                        anchor_name, reason
+                    );
+                    // rt 失效是致命情况：手机 bridge 会跟着断。标记账号 token_invalid，
+                    // 让 UI 弹出"重新登录 anchor"提示
+                    if is_reused_or_revoked_error(&reason) || is_logged_out_error(&reason)
+                    {
+                        if let Ok(mut store) = store.lock() {
+                            if let Some(account) = store.accounts.get_mut(&anchor_id) {
+                                if is_logged_out_error(&reason) {
+                                    account.is_logged_out = true;
+                                } else {
+                                    account.is_token_invalid = true;
+                                }
+                                let _ = store.save();
+                            }
+                        }
+                        let _ = app_handle.emit(
+                            "token-refresh-failed",
+                            RefreshFailedPayload {
+                                account_name: anchor_name.clone(),
+                                reason,
+                            },
+                        );
+                    }
+                }
+            }
         }
     })
 }
